@@ -15,12 +15,26 @@ from agent_service.graph.nodes import (
 from agent_service.graph.state import AgentState
 
 
-__all__ = ["GraphDependencies", "build_graph"]
+__all__ = [
+    "GraphDependencies",
+    "ValidatedCompiledGraph",
+    "build_graph",
+    "validate_thread_id",
+]
 
 THREAD_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 INVALID_THREAD_MESSAGE = (
     "thread_id must be a 1-128 character identifier"
 )
+
+
+def validate_thread_id(thread_id: Any) -> str:
+    if (
+        not isinstance(thread_id, str)
+        or THREAD_ID_PATTERN.fullmatch(thread_id) is None
+    ):
+        raise ValueError(INVALID_THREAD_MESSAGE)
+    return thread_id
 
 
 def _validate_config(config: RunnableConfig | None) -> RunnableConfig:
@@ -29,12 +43,7 @@ def _validate_config(config: RunnableConfig | None) -> RunnableConfig:
     configurable = config.get("configurable")
     if not isinstance(configurable, Mapping):
         raise ValueError(INVALID_THREAD_MESSAGE)
-    thread_id = configurable.get("thread_id")
-    if (
-        not isinstance(thread_id, str)
-        or THREAD_ID_PATTERN.fullmatch(thread_id) is None
-    ):
-        raise ValueError(INVALID_THREAD_MESSAGE)
+    validate_thread_id(configurable.get("thread_id"))
     return config
 
 

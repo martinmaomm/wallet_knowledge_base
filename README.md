@@ -87,16 +87,49 @@ AI 测试 Agent 使用项目根目录下的 `.env` 读取本地模型、测试�
 | `TEST_PAYER_ACCOUNT` | 内部转账付款测试账号，仅保存在本机 `.env`。 |
 | `TEST_RECIPIENT_ACCOUNT` | 内部转账收款测试账号，仅保存在本机 `.env`。 |
 | `TEST_TRANSACTION_PASSWORD` | 测试环境交易密码，仅保存在本机 `.env`。 |
-| `AGENT_API_TOKEN` | 后续 Agent API 鉴权使用的本地 Token；当前留空，API 对接前必须生成并填写，禁止提交。 |
+| `AGENT_API_TOKEN` | Agent API 使用的本地 Bearer Token。生成后只填写到项目根目录中已忽略的 `.env`，禁止提交。 |
 
-可使用下面的命令生成 Token，然后仅填写到本机 `.env`：
+可使用下面的命令生成 Token，然后仅填写到本机 `.env`。不要把真实
+Token 写入 README、Pipe 源码或其他受版本控制的文件：
 
 ```bash
 openssl rand -hex 32
 ```
 
-启动脚本将在后续 Agent API 实现完成后使用：
+启动 Agent API：
 
 ```bash
 ./scripts/run_agent.sh
 ```
+
+`run_agent.sh` 使用 Uvicorn 的默认**单 worker**模式。当前同一
+`thread_id` 的并发互斥锁属于进程内状态，因此不要增加 `--workers`
+或启动多个 Agent API 实例；多进程并发控制需要后续单独设计。
+
+## 8. 安装 Open WebUI 测试 Agent Pipe
+
+当前 Open WebUI 运行在 Docker Desktop 容器中，而 Agent API 运行在
+macOS 宿主机。把 `openwebui_tools/ai_test_agent.py` 导入 Open WebUI
+的 Pipe Function 后，保留默认地址：
+
+```text
+http://host.docker.internal:8770
+```
+
+`host.docker.internal` 是 Docker Desktop 容器访问 macOS 宿主机的固定
+gateway。只有在 Open WebUI 和 Agent API 都直接运行于宿主机时，才改用
+`http://localhost:8770` 或 `http://127.0.0.1:8770`。Pipe 会拒绝其他
+主机、端口、userinfo、路径、查询参数和重定向地址。
+
+在 Open WebUI 容器环境中必须启用 Valve 加密：
+
+- `ENABLE_VALVE_ENCRYPTION=true`
+- `WEBUI_SECRET_KEY` 必须设置为独立生成、长期稳定且不会随容器重建变化的密钥。
+
+`WEBUI_SECRET_KEY` 应通过 Docker Secret、受保护的部署环境变量或其他
+本机秘密管理方式注入，不能提交到本仓库。更换或丢失该密钥可能导致已保存
+的 Valve 凭据无法解密。
+
+最后，在 Open WebUI 的 Pipe 配置界面把与项目 `.env` 中相同的
+`AGENT_API_TOKEN` 填入 `AGENT_API_TOKEN` Valve。不要把真实 Token
+写进 Pipe 文件；Valve 的持久化安全依赖上述 Open WebUI 加密配置。

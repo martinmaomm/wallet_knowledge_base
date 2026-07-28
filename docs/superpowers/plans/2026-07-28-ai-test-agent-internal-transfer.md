@@ -1528,7 +1528,7 @@ git commit -m "feat: orchestrate analysis and human approval"
 - Consumes: compiled graph and Open WebUI `chat_id`.
 - Produces: `POST /agent/messages`, `GET /agent/tasks/{thread_id}`, Open WebUI `Pipe`.
 
-- [ ] **Step 1: Write failing API lifecycle tests**
+- [x] **Step 1: Write failing API lifecycle tests**
 
 Create `tests/agent/test_api.py`:
 
@@ -1639,7 +1639,7 @@ Run:
 
 Expected: FAIL because the Agent API does not exist.
 
-- [ ] **Step 2: Implement the API with persistent SQLite checkpoints**
+- [x] **Step 2: Implement the API with persistent SQLite checkpoints**
 
 FastAPI 的异步请求路径必须使用 `AsyncSqliteSaver`，并在应用 lifespan
 内创建和关闭连接。状态读取使用 `await graph.aget_state(...)`；禁止在
@@ -1834,7 +1834,7 @@ def render_chat_message(state: dict, *, interrupted: bool) -> str:
     return f"任务 {state.get('task_id')} 当前状态：{state.get('status')}"
 ```
 
-- [ ] **Step 3: Implement the thin Open WebUI Pipe**
+- [x] **Step 3: Implement the thin Open WebUI Pipe**
 
 Create `agent_service/integrations/__init__.py` as an empty file.
 
@@ -1889,7 +1889,7 @@ class Pipe:
         return response.json()["message"]
 ```
 
-- [ ] **Step 4: Add Pipe tests and persistent restart verification**
+- [x] **Step 4: Add Pipe tests and persistent restart verification**
 
 Create `tests/agent/test_openwebui_pipe.py`:
 

@@ -17,6 +17,8 @@
 - Model output must pass Pydantic validation; retry at most twice and then pause.
 - The DSL accepts only registered actions and assertions; arbitrary Python, shell, SQL, URLs, and selectors are rejected.
 - Credentials live only in ignored `.env` and ignored Playwright storage state; never print or persist secret values.
+- Every `/agent/*` request requires a local Bearer token; `/health` is the only
+  unauthenticated Agent endpoint.
 - SQLite stores checkpoints and compact metadata; screenshots, traces, HAR, and reports live under `artifacts/<task_id>/`.
 - The six existing manual internal-transfer cases are the Golden Set and must reach 100% required-case coverage.
 - Inferred cases must carry `inferred=true` and a non-empty rationale.
@@ -105,7 +107,7 @@ knowledge_base/
 - Consumes: existing project root and existing `bug_service`.
 - Produces: `agent_service.config.Settings`, reproducible dependency installation, ignored local configuration.
 
-- [ ] **Step 1: Initialize Git and capture the existing baseline**
+- [x] **Step 1: Initialize Git and capture the existing baseline**
 
 Run:
 
@@ -117,7 +119,7 @@ git commit -m "chore: establish knowledge base baseline"
 
 Expected: `git status --short` returns no tracked changes. The ignored `.venv/` and `data/bugs.sqlite3` are not committed.
 
-- [ ] **Step 2: Write the failing settings test**
+- [x] **Step 2: Write the failing settings test**
 
 Create `tests/agent/test_config.py`:
 
@@ -154,7 +156,13 @@ Run:
 
 Expected: FAIL because `agent_service.config` does not exist.
 
-- [ ] **Step 3: Add pinned dependency ranges and pytest configuration**
+Before implementation, extend the same test module with parameterized RED cases
+for remote or malformed Ollama URLs, malformed allowlist origins, a
+`TEST_BASE_URL` outside the allowlist, Playwright storage state outside
+`playwright/.auth/`, `.env` token loading, and `SecretStr` masking. These cases
+must fail against the minimal implementation and pass only after Step 4.
+
+- [x] **Step 3: Add pinned dependency ranges and pytest configuration**
 
 Append to `requirements.txt`:
 
@@ -187,7 +195,7 @@ Run:
 
 Expected: dependency installation succeeds and Playwright reports Chromium installed.
 
-- [ ] **Step 4: Implement settings and local configuration**
+- [x] **Step 4: Implement settings and local configuration**
 
 Create `agent_service/__init__.py` as an empty UTF-8 file.
 
@@ -197,9 +205,44 @@ Create `agent_service/config.py`:
 from __future__ import annotations
 
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, urlsplit
 
-from pydantic import BaseModel, Field, SecretStr, field_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
+
+
+LOCAL_OLLAMA_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _parse_http_url(value: str, field_name: str) -> SplitResult:
+    parts = urlsplit(value.strip())
+    if parts.scheme.lower() not in {"http", "https"}:
+        raise ValueError(f"{field_name} must use http or https")
+    if not parts.hostname:
+        raise ValueError(f"{field_name} must include a hostname")
+    if parts.username is not None or parts.password is not None:
+        raise ValueError(f"{field_name} must not include userinfo")
+    try:
+        parts.port
+    except ValueError as exc:
+        raise ValueError(f"{field_name} has an invalid port") from exc
+    return parts
+
+
+def _origin_from_parts(parts: SplitResult) -> str:
+    hostname = parts.hostname or ""
+    rendered_host = f"[{hostname}]" if ":" in hostname else hostname
+    port = f":{parts.port}" if parts.port is not None else ""
+    return f"{parts.scheme.lower()}://{rendered_host.lower()}{port}"
+
+
+def _normalize_origin(value: str) -> str:
+    parts = _parse_http_url(value, "allowed_test_origins")
+    if parts.path not in {"", "/"} or parts.query or parts.fragment:
+        raise ValueError(
+            "allowed_test_origins entries must be pure origins without "
+            "path, query, or fragment"
+        )
+    return _origin_from_parts(parts)
 
 
 class Settings(BaseModel):
@@ -215,25 +258,56 @@ class Settings(BaseModel):
     test_payer_account: SecretStr = SecretStr("")
     test_recipient_account: SecretStr = SecretStr("")
     test_transaction_password: SecretStr = SecretStr("")
+    agent_api_token: SecretStr = SecretStr("")
     model_retry_limit: int = 2
     environment_retry_limit: int = 1
+
+    @field_validator("ollama_base_url")
+    @classmethod
+    def ollama_endpoint_must_be_local(cls, value: str) -> str:
+        parts = _parse_http_url(value, "ollama_base_url")
+        if parts.hostname not in LOCAL_OLLAMA_HOSTS:
+            raise ValueError("ollama_base_url must use a local hostname")
+        return value.strip().rstrip("/")
 
     @field_validator("allowed_test_origins")
     @classmethod
     def origins_must_be_explicit(cls, value: list[str]) -> list[str]:
-        normalized = [item.rstrip("/") for item in value if item.strip()]
+        normalized = [_normalize_origin(item) for item in value if item.strip()]
         if not normalized:
             raise ValueError("allowed_test_origins cannot be empty")
         return normalized
 
+    @field_validator("playwright_storage_state")
+    @classmethod
+    def storage_state_must_be_in_ignored_directory(cls, value: Path) -> Path:
+        if value.is_absolute() or ".." in value.parts:
+            raise ValueError(
+                "playwright_storage_state must be a relative path under "
+                "playwright/.auth"
+            )
+        if value.parts[:2] != ("playwright", ".auth") or len(value.parts) < 3:
+            raise ValueError(
+                "playwright_storage_state must be a relative path under "
+                "playwright/.auth"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def test_url_must_use_allowed_origin(self) -> "Settings":
+        origin = self.test_origin
+        if origin not in self.allowed_test_origins:
+            raise ValueError(
+                f"TEST_BASE_URL origin {origin!r} is not in ALLOWED_TEST_ORIGINS"
+            )
+        return self
+
     @property
     def test_origin(self) -> str:
-        parts = urlsplit(self.test_base_url)
-        return f"{parts.scheme}://{parts.netloc}"
+        return _origin_from_parts(_parse_http_url(self.test_base_url, "test_base_url"))
 
     def assert_safe_url(self, url: str) -> None:
-        parts = urlsplit(url)
-        origin = f"{parts.scheme}://{parts.netloc}"
+        origin = _origin_from_parts(_parse_http_url(url, "url"))
         if origin not in self.allowed_test_origins:
             raise ValueError(f"URL origin {origin!r} is not allowlisted")
 
@@ -269,6 +343,7 @@ def load_settings(env_file: str | Path = ".env") -> Settings:
         test_transaction_password=str(
             values.get("TEST_TRANSACTION_PASSWORD") or ""
         ),
+        agent_api_token=str(values.get("AGENT_API_TOKEN") or ""),
     )
 ```
 
@@ -287,12 +362,15 @@ AGENT_SOURCE_PATHS=/Users/maoyijiu/Documents/tg-work/测试用例/wallet-web2-te
 TEST_PAYER_ACCOUNT=
 TEST_RECIPIENT_ACCOUNT=
 TEST_TRANSACTION_PASSWORD=
+AGENT_API_TOKEN=
 ```
 
 Add to `.gitignore`:
 
 ```gitignore
 .env
+.DS_Store
+.idea/
 artifacts/
 data/agent.sqlite3
 data/agent.sqlite3-*
@@ -300,7 +378,7 @@ playwright/.auth/
 test-results/
 ```
 
-- [ ] **Step 5: Add the manual start script and verify**
+- [x] **Step 5: Add the manual start script and verify**
 
 Create `scripts/run_agent.sh`:
 
@@ -322,10 +400,12 @@ chmod +x scripts/run_agent.sh
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit the environment baseline**
+- [x] **Step 6: Commit the environment baseline**
 
 ```bash
 git add .gitignore README.md requirements.txt pyproject.toml scripts/run_agent.sh agent_service tests/agent/test_config.py
+git add docs/superpowers/plans/2026-07-28-ai-test-agent-internal-transfer.md
+git add docs/superpowers/specs/2026-07-28-ai-test-agent-internal-transfer-design.md
 git commit -m "build: add local agent development environment"
 ```
 
@@ -599,6 +679,7 @@ def test_execution_is_blocked_before_approval(tmp_path: Path) -> None:
         source_paths=[],
         agent_db_path=tmp_path / "agent.sqlite3",
         artifacts_dir=tmp_path / "artifacts",
+        agent_api_token="test-agent-token",
     )
     with pytest.raises(PermissionError, match="approved"):
         assert_execution_allowed(settings, make_plan(), None)
@@ -1150,6 +1231,7 @@ def test_graph_pauses_for_review_and_resumes(tmp_path: Path) -> None:
         source_paths=[Path("tests/agent/fixtures/web2_internal_transfer.md")],
         agent_db_path=tmp_path / "agent.sqlite3",
         artifacts_dir=tmp_path / "artifacts",
+        agent_api_token="test-agent-token",
     )
     graph = build_graph(
         GraphDependencies(
@@ -1452,6 +1534,7 @@ def test_agent_api_starts_and_approves_task(tmp_path: Path) -> None:
         source_paths=[Path("tests/agent/fixtures/web2_internal_transfer.md")],
         agent_db_path=tmp_path / "agent.sqlite3",
         artifacts_dir=tmp_path / "artifacts",
+        agent_api_token="test-agent-token",
     )
     provider = FakeModelProvider.from_fixture(
         Path("tests/agent/fixtures/model_outputs.json")
@@ -1464,6 +1547,7 @@ def test_agent_api_starts_and_approves_task(tmp_path: Path) -> None:
             first = await client.post(
                 "/agent/messages",
                 json={"thread_id": "chat-1", "message": "测试内部转账"},
+                headers={"Authorization": "Bearer test-agent-token"},
             )
             assert first.status_code == 200
             assert first.json()["status"] == "waiting_approval"
@@ -1471,9 +1555,54 @@ def test_agent_api_starts_and_approves_task(tmp_path: Path) -> None:
             approved = await client.post(
                 "/agent/messages",
                 json={"thread_id": "chat-1", "message": "批准"},
+                headers={"Authorization": "Bearer test-agent-token"},
             )
             assert approved.status_code == 200
             assert approved.json()["status"] == "approved"
+
+            missing = await client.post(
+                "/agent/messages",
+                json={"thread_id": "chat-2", "message": "测试内部转账"},
+            )
+            assert missing.status_code == 401
+
+            wrong = await client.post(
+                "/agent/messages",
+                json={"thread_id": "chat-3", "message": "测试内部转账"},
+                headers={"Authorization": "Bearer wrong-token"},
+            )
+            assert wrong.status_code == 401
+
+    asyncio.run(exercise())
+
+
+def test_agent_api_refuses_unconfigured_token(tmp_path: Path) -> None:
+    settings = Settings(
+        test_base_url="https://wallet-test.local",
+        allowed_test_origins=["https://wallet-test.local"],
+        source_paths=[Path("tests/agent/fixtures/web2_internal_transfer.md")],
+        agent_db_path=tmp_path / "agent.sqlite3",
+        artifacts_dir=tmp_path / "artifacts",
+    )
+    app = create_app(
+        settings=settings,
+        model_provider=FakeModelProvider.from_fixture(
+            Path("tests/agent/fixtures/model_outputs.json")
+        ),
+    )
+
+    async def exercise() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                "/agent/messages",
+                json={"thread_id": "chat-1", "message": "测试内部转账"},
+                headers={"Authorization": "Bearer any-token"},
+            )
+            assert response.status_code == 503
 
     asyncio.run(exercise())
 ```
@@ -1495,8 +1624,9 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import asynccontextmanager
+from secrets import compare_digest
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 from pydantic import BaseModel
@@ -1559,6 +1689,15 @@ def create_app(
 
     app = FastAPI(title="Local AI Test Agent", version="0.1.0", lifespan=lifespan)
 
+    async def require_agent_token(
+        authorization: str | None = Header(default=None),
+    ) -> None:
+        expected = configured.agent_api_token.get_secret_value()
+        if not expected:
+            raise HTTPException(503, "AGENT_API_TOKEN is not configured")
+        if not compare_digest(authorization or "", f"Bearer {expected}"):
+            raise HTTPException(401, "invalid Agent API token")
+
     @app.get("/health")
     async def health() -> dict:
         return {
@@ -1568,7 +1707,10 @@ def create_app(
             "cloud_model_calls": 0,
         }
 
-    @app.post("/agent/messages")
+    @app.post(
+        "/agent/messages",
+        dependencies=[Depends(require_agent_token)],
+    )
     async def messages(request: AgentMessage) -> dict:
         config = {"configurable": {"thread_id": request.thread_id}}
         snapshot = graph.get_state(config)
@@ -1599,7 +1741,10 @@ def create_app(
             "message": render_chat_message(state.values, interrupted=interrupted),
         }
 
-    @app.get("/agent/tasks/{thread_id}")
+    @app.get(
+        "/agent/tasks/{thread_id}",
+        dependencies=[Depends(require_agent_token)],
+    )
     async def task(thread_id: str) -> dict:
         state = graph.get_state({"configurable": {"thread_id": thread_id}})
         if not state.values:
@@ -1638,6 +1783,10 @@ class Pipe:
             default="http://host.docker.internal:8770",
             description="Local AI Test Agent service URL",
         )
+        AGENT_API_TOKEN: str = Field(
+            default="",
+            description="Bearer token from the Agent service .env",
+        )
 
     def __init__(self):
         self.valves = self.Valves()
@@ -1661,6 +1810,9 @@ class Pipe:
             response = await client.post(
                 f"{self.valves.AGENT_BASE_URL.rstrip('/')}/agent/messages",
                 json={"thread_id": chat_id, "message": message},
+                headers={
+                    "Authorization": f"Bearer {self.valves.AGENT_API_TOKEN}",
+                },
             )
         if response.status_code >= 400:
             return f"测试 Agent 调用失败：{response.status_code} {response.text}"
@@ -1683,10 +1835,12 @@ def test_pipe_forwards_chat_id_and_user_prompt() -> None:
     captured: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        captured.update(__import__("json").loads(request.content))
+        captured["body"] = __import__("json").loads(request.content)
+        captured["authorization"] = request.headers["Authorization"]
         return httpx.Response(200, json={"message": "等待审批"})
 
     pipe = Pipe()
+    pipe.valves.AGENT_API_TOKEN = "test-agent-token"
     pipe.client_factory = lambda **kwargs: httpx.AsyncClient(
         transport=httpx.MockTransport(handler),
         timeout=kwargs["timeout"],
@@ -1702,8 +1856,11 @@ def test_pipe_forwards_chat_id_and_user_prompt() -> None:
     )
     assert result == "等待审批"
     assert captured == {
-        "thread_id": "chat-1",
-        "message": "测试内部转账",
+        "body": {
+            "thread_id": "chat-1",
+            "message": "测试内部转账",
+        },
+        "authorization": "Bearer test-agent-token",
     }
 ```
 
@@ -1718,8 +1875,13 @@ Expected: PASS.
 Run a manual persistence smoke:
 
 ```bash
+export AGENT_API_TOKEN="$(
+  .venv/bin/python -c \
+  'from dotenv import dotenv_values; print(dotenv_values(".env")["AGENT_API_TOKEN"])'
+)"
 scripts/run_agent.sh
 curl -sS -X POST http://localhost:8770/agent/messages \
+  -H "Authorization: Bearer ${AGENT_API_TOKEN}" \
   -H 'Content-Type: application/json' \
   -d '{"thread_id":"manual-1","message":"测试内部转账"}'
 ```
@@ -1728,6 +1890,7 @@ Expected: JSON status `waiting_approval`. Stop and restart the Agent, then:
 
 ```bash
 curl -sS -X POST http://localhost:8770/agent/messages \
+  -H "Authorization: Bearer ${AGENT_API_TOKEN}" \
   -H 'Content-Type: application/json' \
   -d '{"thread_id":"manual-1","message":"批准"}'
 ```
@@ -2475,19 +2638,23 @@ import os
 
 import httpx
 import pytest
+from dotenv import load_dotenv
 
 
 pytestmark = pytest.mark.e2e
+load_dotenv()
 
 
 class RealAgentClient:
-    def __init__(self, base_url: str):
+    def __init__(self, base_url: str, token: str):
         self.base_url = base_url.rstrip("/")
+        self.token = token
 
     def send(self, thread_id: str, message: str) -> dict:
         response = httpx.post(
             f"{self.base_url}/agent/messages",
             json={"thread_id": thread_id, "message": message},
+            headers={"Authorization": f"Bearer {self.token}"},
             timeout=600,
         )
         response.raise_for_status()
@@ -2497,9 +2664,10 @@ class RealAgentClient:
 @pytest.fixture
 def real_agent_client() -> RealAgentClient:
     base_url = os.getenv("AGENT_BASE_URL", "http://localhost:8770")
+    token = os.environ["AGENT_API_TOKEN"]
     response = httpx.get(f"{base_url}/health", timeout=10)
     response.raise_for_status()
-    return RealAgentClient(base_url)
+    return RealAgentClient(base_url, token)
 
 
 @pytest.mark.skipif(
@@ -2525,11 +2693,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 
 import httpx
+from dotenv import load_dotenv
 
 
 def main() -> None:
+    load_dotenv()
     parser = argparse.ArgumentParser()
     parser.add_argument("--thread-id", default="portfolio-demo")
     parser.add_argument("--approve", action="store_true")
@@ -2538,6 +2709,9 @@ def main() -> None:
     response = httpx.post(
         "http://localhost:8770/agent/messages",
         json={"thread_id": args.thread_id, "message": message},
+        headers={
+            "Authorization": f"Bearer {os.environ['AGENT_API_TOKEN']}",
+        },
         timeout=300,
     )
     response.raise_for_status()
@@ -2557,7 +2731,8 @@ Use the content of `agent_service/integrations/openwebui_pipe.py`:
 3. Review the code and save it.
 4. Enable the Function.
 5. Set `AGENT_BASE_URL=http://host.docker.internal:8770`.
-6. Select `AI Test Agent` as the chat model.
+6. Set `AGENT_API_TOKEN` to the same local token stored in the Agent `.env`.
+7. Select `AI Test Agent` as the chat model.
 
 Expected: sending `测试 Web2 内部转账` returns a task summary and waits for approval. Sending `批准` in the same chat resumes the same LangGraph thread.
 

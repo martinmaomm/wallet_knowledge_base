@@ -308,6 +308,8 @@ Open WebUI 会话 ID 映射到 LangGraph `thread_id`，保证同一对话可以�
 - 使用独立测试环境。
 - 至少准备付款账号和收款账号。
 - 凭据通过本地忽略文件或环境变量提供，不写入代码、数据库日志和报告。
+- Agent 服务为兼容 Open WebUI Docker 可监听宿主机接口，但除健康检查外，
+  所有 `/agent/*` 请求必须携带本地 Bearer Token。
 - 执行前记录余额和交易记录快照。
 - 测试数据使用唯一 `task_id` 标识。
 
@@ -318,6 +320,8 @@ Open WebUI 会话 ID 映射到 LangGraph `thread_id`，保证同一对话可以�
 - 审批前禁止执行任何转账操作。
 - DSL 不允许任意代码、Shell、SQL 或自定义 URL。
 - 日志和报告脱敏 Cookie、Token、手机号、邮箱及账号凭据。
+- Agent API Token 只保存在本机 `.env` 和 Open WebUI Function 的 Valves 配置中，
+  不进入 LangGraph 状态、SQLite 检查点或测试产物。
 - 写操作必须携带当前任务 ID 和幂等保护信息（若业务接口支持）。
 - 每个任务限制最大节点次数、模型重试次数和执行时长。
 
@@ -410,4 +414,3 @@ artifacts/<task_id>/
 ## 17. 实施边界
 
 第一阶段只建立可运行的内部转账闭环。链上转账、后台、App、多 Agent、自动提 Bug 和模型横向评测均作为后续独立迭代，不进入本设计的实现范围。
-

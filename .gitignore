@@ -1,7 +1,15 @@
 .venv/
+.env
+.DS_Store
+.idea/
 __pycache__/
 .pytest_cache/
 *.py[cod]
+artifacts/
 data/*.sqlite3
 data/*.sqlite3-*
 data/*.log
+data/agent.sqlite3
+data/agent.sqlite3-*
+playwright/.auth/
+test-results/

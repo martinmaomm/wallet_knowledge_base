@@ -8,6 +8,7 @@
 cd /Users/maoyijiu/Documents/tg-work/knowledge_base
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
+.venv/bin/playwright install chromium
 ```
 
 ## 2. 同步禅道 Bug
@@ -66,4 +67,36 @@ curl 'http://localhost:8765/bugs?keyword=提现&limit=20'
 
 ```bash
 .venv/bin/python -m pytest -q
+```
+
+## 7. AI 测试 Agent 本地配置
+
+AI 测试 Agent 使用项目根目录下的 `.env` 读取本地模型、测试环境和运行数据配置。该文件已加入 `.gitignore`，禁止提交测试账号、交易密码、浏览器认证状态或其他凭据。
+
+| 参数 | 说明 |
+|---|---|
+| `OLLAMA_BASE_URL` | Ollama 本地模型服务地址。 |
+| `OLLAMA_MODEL` | 本地推理模型名称，默认使用 `qwen3.5:9b`。 |
+| `BUG_SERVICE_URL` | 当前项目的结构化 Bug 查询服务地址。 |
+| `TEST_BASE_URL` | 钱包 Web2 测试环境地址，必须由使用者填写。 |
+| `ALLOWED_TEST_ORIGINS` | 允许自动化访问的测试环境来源列表，多个来源使用英文逗号分隔。 |
+| `AGENT_DB_PATH` | Agent 本地 SQLite 状态文件路径。 |
+| `ARTIFACTS_DIR` | 截图、网络记录和测试报告等运行产物目录。 |
+| `PLAYWRIGHT_STORAGE_STATE` | Playwright 浏览器认证状态文件路径。 |
+| `AGENT_SOURCE_PATHS` | PRD、评审记录和测试用例等本地资料路径，多个路径使用英文逗号分隔。 |
+| `TEST_PAYER_ACCOUNT` | 内部转账付款测试账号，仅保存在本机 `.env`。 |
+| `TEST_RECIPIENT_ACCOUNT` | 内部转账收款测试账号，仅保存在本机 `.env`。 |
+| `TEST_TRANSACTION_PASSWORD` | 测试环境交易密码，仅保存在本机 `.env`。 |
+| `AGENT_API_TOKEN` | 后续 Agent API 鉴权使用的本地 Token；当前留空，API 对接前必须生成并填写，禁止提交。 |
+
+可使用下面的命令生成 Token，然后仅填写到本机 `.env`：
+
+```bash
+openssl rand -hex 32
+```
+
+启动脚本将在后续 Agent API 实现完成后使用：
+
+```bash
+./scripts/run_agent.sh
 ```

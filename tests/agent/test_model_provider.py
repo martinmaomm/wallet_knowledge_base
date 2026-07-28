@@ -59,9 +59,7 @@ def test_fake_provider_returns_strictly_validated_schema() -> None:
 
     assert isinstance(result, RequirementSet)
     assert result.requirements[0].confirmed is True
-    assert result.requirements[0].source_refs == [
-        "PRD:web2-internal-transfer"
-    ]
+    assert result.requirements[0].source_refs == ["{{SOURCE_ID}}"]
     assert provider.calls == ["extract_requirements"]
 
 

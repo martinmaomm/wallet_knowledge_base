@@ -1180,7 +1180,7 @@ git commit -m "feat: load versioned sources and related bugs"
 - Consumes: `Settings`, `ModelProvider`, `BugClient`, source loader, schemas.
 - Produces: `build_graph(deps, checkpointer)`, resumable graph state keyed by `thread_id`.
 
-- [ ] **Step 1: Write the failing approval and resume graph test**
+- [x] **Step 1: Write the failing approval and resume graph test**
 
 Create `tests/agent/test_graph.py`:
 
@@ -1276,7 +1276,7 @@ Run:
 
 Expected: FAIL because the graph modules do not exist.
 
-- [ ] **Step 2: Define graph state and dependencies**
+- [x] **Step 2: Define graph state and dependencies**
 
 Create `agent_service/graph/state.py`:
 
@@ -1412,7 +1412,7 @@ def make_nodes(deps: GraphDependencies) -> dict[str, object]:
     }
 ```
 
-- [ ] **Step 3: Build the first graph through approval**
+- [x] **Step 3: Build the first graph through approval**
 
 Create `agent_service/graph/build.py`:
 
@@ -1446,7 +1446,7 @@ def build_graph(deps: GraphDependencies, checkpointer):
 
 Create `agent_service/graph/__init__.py` as an empty file.
 
-- [ ] **Step 4: Store prompts as versioned files and wire them into nodes**
+- [x] **Step 4: Store prompts as versioned files and wire them into nodes**
 
 Create the four prompt files with explicit rules:
 
@@ -1500,7 +1500,7 @@ def read_prompt(name: str) -> str:
     return (PROMPTS_DIR / f"{name}.md").read_text(encoding="utf-8")
 ```
 
-- [ ] **Step 5: Run graph tests and commit**
+- [x] **Step 5: Run graph tests and commit**
 
 ```bash
 .venv/bin/python -m pytest tests/agent/test_graph.py -v
@@ -1557,7 +1557,7 @@ def test_agent_api_starts_and_approves_task(tmp_path: Path) -> None:
     )
     app = create_app(settings=settings, model_provider=provider)
 
-    async def exercise() -> None:
+    async def exercise_requests() -> None:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             first = await client.post(
@@ -1589,6 +1589,10 @@ def test_agent_api_starts_and_approves_task(tmp_path: Path) -> None:
             )
             assert wrong.status_code == 401
 
+    async def exercise() -> None:
+        async with app.router.lifespan_context(app):
+            await exercise_requests()
+
     asyncio.run(exercise())
 
 
@@ -1607,7 +1611,7 @@ def test_agent_api_refuses_unconfigured_token(tmp_path: Path) -> None:
         ),
     )
 
-    async def exercise() -> None:
+    async def exercise_requests() -> None:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(
             transport=transport,
@@ -1619,6 +1623,10 @@ def test_agent_api_refuses_unconfigured_token(tmp_path: Path) -> None:
                 headers={"Authorization": "Bearer any-token"},
             )
             assert response.status_code == 503
+
+    async def exercise() -> None:
+        async with app.router.lifespan_context(app):
+            await exercise_requests()
 
     asyncio.run(exercise())
 ```
@@ -1633,17 +1641,22 @@ Expected: FAIL because the Agent API does not exist.
 
 - [ ] **Step 2: Implement the API with persistent SQLite checkpoints**
 
+FastAPI 的异步请求路径必须使用 `AsyncSqliteSaver`，并在应用 lifespan
+内创建和关闭连接。状态读取使用 `await graph.aget_state(...)`；禁止在
+事件循环中使用同步 `SqliteSaver`、同步 SQLite 连接或同步
+`graph.get_state(...)`。
+
 Create `agent_service/api.py`:
 
 ```python
 from __future__ import annotations
 
-import sqlite3
 from contextlib import asynccontextmanager
 from secrets import compare_digest
+from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException
-from langgraph.checkpoint.sqlite import SqliteSaver
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command
 from pydantic import BaseModel
 
@@ -1657,6 +1670,24 @@ from agent_service.schemas import ApprovalDecision
 class AgentMessage(BaseModel):
     thread_id: str
     message: str
+
+
+def safe_interrupts(snapshot: Any) -> list[dict[str, str]]:
+    rendered: list[dict[str, str]] = []
+    for task in snapshot.tasks:
+        for pending in task.interrupts:
+            value = pending.value
+            status = value.get("status") if isinstance(value, dict) else None
+            if status == "waiting_approval":
+                rendered.append({"status": "waiting_approval"})
+            elif status == "invalid_approval":
+                rendered.append(
+                    {
+                        "status": "invalid_approval",
+                        "message": "审批输入或方案无效，请重新操作。",
+                    }
+                )
+    return rendered
 
 
 def parse_decision(message: str) -> ApprovalDecision | None:
@@ -1682,26 +1713,27 @@ def create_app(
 ) -> FastAPI:
     configured = settings or load_settings()
     configured.agent_db_path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(configured.agent_db_path, check_same_thread=False)
-    checkpointer = SqliteSaver(connection)
     provider = model_provider or OllamaProvider(
         base_url=configured.ollama_base_url,
         model=configured.ollama_model,
         retry_limit=configured.model_retry_limit,
     )
-    graph = build_graph(
-        GraphDependencies(
-            settings=configured,
-            model_provider=provider,
-            bug_client=BugClient(configured.bug_service_url),
-        ),
-        checkpointer,
-    )
 
     @asynccontextmanager
-    async def lifespan(_: FastAPI):
-        yield
-        connection.close()
+    async def lifespan(app: FastAPI):
+        async with AsyncSqliteSaver.from_conn_string(
+            str(configured.agent_db_path)
+        ) as checkpointer:
+            await checkpointer.setup()
+            app.state.graph = build_graph(
+                GraphDependencies(
+                    settings=configured,
+                    model_provider=provider,
+                    bug_client=BugClient(configured.bug_service_url),
+                ),
+                checkpointer,
+            )
+            yield
 
     app = FastAPI(title="Local AI Test Agent", version="0.1.0", lifespan=lifespan)
 
@@ -1727,33 +1759,41 @@ def create_app(
         "/agent/messages",
         dependencies=[Depends(require_agent_token)],
     )
-    async def messages(request: AgentMessage) -> dict:
-        config = {"configurable": {"thread_id": request.thread_id}}
-        snapshot = graph.get_state(config)
-        decision = parse_decision(request.message)
+    async def messages(message: AgentMessage, request: Request) -> dict:
+        graph = request.app.state.graph
+        config = {"configurable": {"thread_id": message.thread_id}}
+        snapshot = await graph.aget_state(config)
+        current_interrupts = safe_interrupts(snapshot)
+        interrupted = bool(current_interrupts)
+        decision = parse_decision(message.message)
         if decision:
-            if not snapshot.next:
+            if not interrupted:
                 raise HTTPException(409, "thread is not waiting for approval")
             result = await graph.ainvoke(
                 Command(resume=decision.model_dump()),
                 config=config,
             )
         else:
-            if snapshot.values and snapshot.next:
+            if snapshot.values and interrupted:
                 raise HTTPException(409, "thread is waiting for approval")
             result = await graph.ainvoke(
                 {
-                    "thread_id": request.thread_id,
-                    "user_message": request.message,
+                    "thread_id": message.thread_id,
+                    "user_message": message.message,
                 },
                 config=config,
             )
-        state = graph.get_state(config)
-        interrupted = bool(state.next)
+        state = await graph.aget_state(config)
+        current_interrupts = safe_interrupts(state)
+        interrupted = bool(current_interrupts)
         return {
-            "thread_id": request.thread_id,
+            "thread_id": message.thread_id,
             "task_id": state.values.get("task_id"),
-            "status": "waiting_approval" if interrupted else result.get("status"),
+            "status": (
+                current_interrupts[-1]["status"]
+                if interrupted
+                else result.get("status")
+            ),
             "message": render_chat_message(state.values, interrupted=interrupted),
         }
 
@@ -1761,11 +1801,25 @@ def create_app(
         "/agent/tasks/{thread_id}",
         dependencies=[Depends(require_agent_token)],
     )
-    async def task(thread_id: str) -> dict:
-        state = graph.get_state({"configurable": {"thread_id": thread_id}})
+    async def task(thread_id: str, request: Request) -> dict:
+        graph = request.app.state.graph
+        state = await graph.aget_state(
+            {"configurable": {"thread_id": thread_id}}
+        )
         if not state.values:
             raise HTTPException(404, "task not found")
-        return {"values": state.values, "next": list(state.next)}
+        current_interrupts = safe_interrupts(state)
+        return {
+            "values": state.values,
+            "next": list(state.next),
+            "interrupts": current_interrupts,
+            "status": (
+                current_interrupts[-1]["status"]
+                if current_interrupts
+                else state.values.get("status")
+            ),
+            "waiting": bool(current_interrupts),
+        }
 
     return app
 

@@ -11,6 +11,15 @@ from pydantic import BaseModel, ConfigDict
 
 ALLOWED_SOURCE_SUFFIXES = frozenset({".md", ".txt"})
 MAX_SOURCE_BYTES = 2 * 1024 * 1024
+PROMPTS_DIR = Path(__file__).resolve().parents[1] / "prompts"
+ALLOWED_PROMPTS = frozenset(
+    {
+        "extract_requirements",
+        "analyze_risks",
+        "generate_test_plan",
+        "classify_failure",
+    }
+)
 
 
 class SourceLoadError(ValueError):
@@ -144,3 +153,13 @@ def load_sources(paths: list[Path]) -> LoadedSources:
         )
 
     return LoadedSources(documents=tuple(documents))
+
+
+def read_prompt(name: str) -> str:
+    if not isinstance(name, str) or name not in ALLOWED_PROMPTS:
+        raise ValueError("unknown prompt")
+
+    raw_content, _ = _read_regular_file(PROMPTS_DIR / f"{name}.md")
+    if len(raw_content) > MAX_SOURCE_BYTES:
+        raise ValueError("prompt file exceeds 2 MiB")
+    return raw_content.decode("utf-8")

@@ -6,7 +6,7 @@
         "requirement_id": "REQ-001",
         "statement": "余额不足时禁止内部转账",
         "source_refs": [
-          "PRD:web2-internal-transfer"
+          "{{SOURCE_ID}}"
         ],
         "confirmed": true
       }
@@ -48,7 +48,7 @@
         "priority": "P0",
         "source_refs": [
           "人工基准:TC-OTI-002",
-          "PRD:web2-internal-transfer"
+          "{{SOURCE_ID}}"
         ],
         "inferred": false,
         "rationale": "manual baseline",

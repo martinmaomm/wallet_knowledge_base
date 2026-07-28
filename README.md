@@ -75,7 +75,7 @@ AI 测试 Agent 使用项目根目录下的 `.env` 读取本地模型、测试�
 
 | 参数 | 说明 |
 |---|---|
-| `OLLAMA_BASE_URL` | Ollama 本地模型服务地址。 |
+| `OLLAMA_BASE_URL` | Ollama 本地模型服务地址，默认使用 `http://127.0.0.1:11434`。本机采用 IPv4 环回地址，避免 `localhost` 在不同环境解析到 IPv4 或 IPv6 所造成的连接差异；仍允许显式配置 `localhost` 或 `::1`。 |
 | `OLLAMA_MODEL` | 本地推理模型名称，默认使用 `qwen3.5:9b`。 |
 | `BUG_SERVICE_URL` | 当前项目的结构化 Bug 查询服务地址。 |
 | `TEST_BASE_URL` | 钱包 Web2 测试环境地址，必须由使用者填写。 |

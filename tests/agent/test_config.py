@@ -132,6 +132,29 @@ def test_load_settings_reads_agent_api_token(tmp_path: Path) -> None:
     assert settings.agent_api_token.get_secret_value() == "local-agent-token"
 
 
+def test_settings_and_loader_default_to_ipv4_ollama_loopback(
+    tmp_path: Path,
+) -> None:
+    direct_values = settings_kwargs(tmp_path)
+    direct_values.pop("ollama_base_url")
+    direct_settings = Settings(**direct_values)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "TEST_BASE_URL=https://wallet-test.local/internal-transfer",
+                "ALLOWED_TEST_ORIGINS=https://wallet-test.local/",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    loaded_settings = load_settings(env_file)
+
+    assert direct_settings.ollama_base_url == "http://127.0.0.1:11434"
+    assert loaded_settings.ollama_base_url == "http://127.0.0.1:11434"
+
+
 def test_agent_api_token_is_masked_in_settings_repr(tmp_path: Path) -> None:
     settings = Settings(
         **settings_kwargs(tmp_path),

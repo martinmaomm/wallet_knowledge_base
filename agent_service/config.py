@@ -42,7 +42,7 @@ def _normalize_origin(value: str) -> str:
 
 
 class Settings(BaseModel):
-    ollama_base_url: str = "http://localhost:11434"
+    ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "qwen3.5:9b"
     bug_service_url: str = "http://localhost:8765"
     test_base_url: str
@@ -123,7 +123,9 @@ def load_settings(env_file: str | Path = ".env") -> Settings:
         if item.strip()
     ]
     return Settings(
-        ollama_base_url=str(values.get("OLLAMA_BASE_URL") or "http://localhost:11434"),
+        ollama_base_url=str(
+            values.get("OLLAMA_BASE_URL") or "http://127.0.0.1:11434"
+        ),
         ollama_model=str(values.get("OLLAMA_MODEL") or "qwen3.5:9b"),
         bug_service_url=str(values.get("BUG_SERVICE_URL") or "http://localhost:8765"),
         test_base_url=str(values.get("TEST_BASE_URL") or ""),

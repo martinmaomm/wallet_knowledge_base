@@ -246,7 +246,7 @@ def _normalize_origin(value: str) -> str:
 
 
 class Settings(BaseModel):
-    ollama_base_url: str = "http://localhost:11434"
+    ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "qwen3.5:9b"
     bug_service_url: str = "http://localhost:8765"
     test_base_url: str
@@ -327,7 +327,9 @@ def load_settings(env_file: str | Path = ".env") -> Settings:
         if item.strip()
     ]
     return Settings(
-        ollama_base_url=str(values.get("OLLAMA_BASE_URL") or "http://localhost:11434"),
+        ollama_base_url=str(
+            values.get("OLLAMA_BASE_URL") or "http://127.0.0.1:11434"
+        ),
         ollama_model=str(values.get("OLLAMA_MODEL") or "qwen3.5:9b"),
         bug_service_url=str(values.get("BUG_SERVICE_URL") or "http://localhost:8765"),
         test_base_url=str(values.get("TEST_BASE_URL") or ""),
@@ -350,7 +352,7 @@ def load_settings(env_file: str | Path = ".env") -> Settings:
 Create `.env` with non-secret defaults and empty credential slots:
 
 ```dotenv
-OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_BASE_URL=http://127.0.0.1:11434
 OLLAMA_MODEL=qwen3.5:9b
 BUG_SERVICE_URL=http://localhost:8765
 TEST_BASE_URL=
@@ -728,7 +730,7 @@ git commit -m "feat: define safe internal transfer test DSL"
 - Consumes: any Pydantic output schema.
 - Produces: `ModelProvider.generate_structured(task_type, prompt, schema)`, `OllamaProvider`, `FakeModelProvider`.
 
-- [ ] **Step 1: Write failing provider contract tests**
+- [x] **Step 1: Write failing provider contract tests**
 
 Create `tests/agent/test_model_provider.py`:
 
@@ -784,7 +786,7 @@ Run:
 
 Expected: FAIL because `model_provider.py` does not exist.
 
-- [ ] **Step 2: Implement the provider protocol and retry boundary**
+- [x] **Step 2: Implement the provider protocol and retry boundary**
 
 Create `agent_service/model_provider.py`:
 
@@ -889,7 +891,7 @@ Create `tests/agent/fixtures/model_outputs.json`:
 }
 ```
 
-- [ ] **Step 3: Add the Ollama implementation without cloud fallback**
+- [x] **Step 3: Add the Ollama implementation without cloud fallback**
 
 Append to `agent_service/model_provider.py`:
 
@@ -940,18 +942,18 @@ class OllamaProvider:
         )
 ```
 
-- [ ] **Step 4: Verify fake and real provider boundaries**
+- [x] **Step 4: Verify fake and real provider boundaries**
 
 Run:
 
 ```bash
 .venv/bin/python -m pytest tests/agent/test_model_provider.py -v
-.venv/bin/python -c "from agent_service.model_provider import OllamaProvider; OllamaProvider(base_url='http://localhost:11434', model='qwen3.5:9b')"
+.venv/bin/python -c "from agent_service.model_provider import OllamaProvider; OllamaProvider(base_url='http://127.0.0.1:11434', model='qwen3.5:9b')"
 ```
 
 Expected: tests PASS and the constructor command exits with code 0 without calling the model.
 
-- [ ] **Step 5: Commit the provider abstraction**
+- [x] **Step 5: Commit the provider abstraction**
 
 ```bash
 git add agent_service/model_provider.py tests/agent/test_model_provider.py tests/agent/fixtures

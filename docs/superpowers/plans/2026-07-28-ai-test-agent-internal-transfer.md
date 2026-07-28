@@ -424,7 +424,7 @@ git commit -m "build: add local agent development environment"
 - Consumes: `Settings.assert_safe_url`.
 - Produces: `RequirementSet`, `RiskAnalysis`, `TestPlan`, `ApprovalDecision`, `validate_test_plan(plan)`.
 
-- [ ] **Step 1: Write failing DSL validation tests**
+- [x] **Step 1: Write failing DSL validation tests**
 
 Create `tests/agent/test_dsl.py`:
 
@@ -487,7 +487,7 @@ Run:
 
 Expected: FAIL because the schemas do not exist.
 
-- [ ] **Step 2: Implement the domain schemas**
+- [x] **Step 2: Implement the domain schemas**
 
 Create `agent_service/schemas.py` with these public models:
 
@@ -603,7 +603,7 @@ class ApprovalDecision(BaseModel):
     feedback: str = ""
 ```
 
-- [ ] **Step 3: Implement deterministic DSL validation**
+- [x] **Step 3: Implement deterministic DSL validation**
 
 Create `agent_service/dsl.py`:
 
@@ -644,7 +644,10 @@ Create `agent_service/execution/security.py`:
 ```python
 from __future__ import annotations
 
+from secrets import compare_digest
+
 from agent_service.config import Settings
+from agent_service.dsl import plan_fingerprint
 from agent_service.schemas import ApprovalDecision, TestPlan
 
 
@@ -656,11 +659,13 @@ def assert_execution_allowed(
     settings.assert_safe_url(settings.test_base_url)
     if approval is None or approval.action != "approve":
         raise PermissionError("test execution requires an approved decision")
-    if not plan.cases:
-        raise ValueError("approved test plan cannot be empty")
+    if approval.plan_hash is None:
+        raise PermissionError("approved decision requires a plan hash")
+    if not compare_digest(approval.plan_hash, plan_fingerprint(plan)):
+        raise PermissionError("approved plan hash does not match current plan")
 ```
 
-- [ ] **Step 4: Run and extend the safety tests**
+- [x] **Step 4: Run and extend the safety tests**
 
 Add to `tests/agent/test_dsl.py`:
 
@@ -668,6 +673,7 @@ Add to `tests/agent/test_dsl.py`:
 from pathlib import Path
 
 from agent_service.config import Settings
+from agent_service.dsl import plan_fingerprint
 from agent_service.execution.security import assert_execution_allowed
 from agent_service.schemas import ApprovalDecision
 
@@ -687,7 +693,10 @@ def test_execution_is_blocked_before_approval(tmp_path: Path) -> None:
     assert_execution_allowed(
         settings,
         make_plan(),
-        ApprovalDecision(action="approve"),
+        ApprovalDecision(
+            action="approve",
+            plan_hash=plan_fingerprint(make_plan()),
+        ),
     )
 ```
 
@@ -699,7 +708,7 @@ Run:
 
 Expected: all tests PASS.
 
-- [ ] **Step 5: Commit schemas and safety rules**
+- [x] **Step 5: Commit schemas and safety rules**
 
 ```bash
 git add agent_service/schemas.py agent_service/dsl.py agent_service/execution tests/agent/test_dsl.py
@@ -1302,7 +1311,7 @@ from langgraph.types import interrupt
 
 from agent_service.bug_client import BugClient
 from agent_service.config import Settings
-from agent_service.dsl import validate_test_plan
+from agent_service.dsl import plan_fingerprint, validate_test_plan
 from agent_service.model_provider import ModelProvider
 from agent_service.schemas import ApprovalDecision, RequirementSet, RiskAnalysis, TestPlan
 from agent_service.sources import load_sources, read_prompt
@@ -1374,7 +1383,7 @@ def make_nodes(deps: GraphDependencies) -> dict[str, object]:
         return {"test_plan": plan.model_dump(), "status": "plan_validated"}
 
     def human_review(state: dict) -> dict:
-        decision = ApprovalDecision.model_validate(
+        payload = dict(
             interrupt(
                 {
                     "task_id": state["task_id"],
@@ -1383,6 +1392,11 @@ def make_nodes(deps: GraphDependencies) -> dict[str, object]:
                 }
             )
         )
+        if payload.get("action") == "approve":
+            payload["plan_hash"] = plan_fingerprint(
+                TestPlan.model_validate(state["test_plan"])
+            )
+        decision = ApprovalDecision.model_validate(payload)
         next_status = "approved" if decision.action == "approve" else decision.action
         return {"approval": decision.model_dump(), "status": next_status}
 

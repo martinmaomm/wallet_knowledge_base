@@ -975,7 +975,7 @@ git commit -m "feat: add replaceable local model provider"
 - Consumes: configured source paths and `bug_service` HTTP API.
 - Produces: `load_sources(paths) -> LoadedSources`, `BugClient.search_related(queries) -> list[RelatedBug]`.
 
-- [ ] **Step 1: Write failing source-loader tests**
+- [x] **Step 1: Write failing source-loader tests**
 
 Create `tests/agent/fixtures/web2_internal_transfer.md`:
 
@@ -1013,7 +1013,7 @@ Run:
 
 Expected: FAIL because `sources.py` does not exist.
 
-- [ ] **Step 2: Implement deterministic source loading**
+- [x] **Step 2: Implement deterministic source loading**
 
 Create `agent_service/sources.py`:
 
@@ -1061,7 +1061,7 @@ def load_sources(paths: list[Path]) -> LoadedSources:
     return LoadedSources(documents=documents)
 ```
 
-- [ ] **Step 3: Write the bug-client contract test**
+- [x] **Step 3: Write the bug-client contract test**
 
 Create `tests/agent/test_bug_client.py`:
 
@@ -1093,7 +1093,7 @@ def test_bug_client_deduplicates_results() -> None:
         )
 
     client = BugClient(
-        "http://bug-service",
+        "http://127.0.0.1:8765",
         transport=httpx.MockTransport(handler),
     )
     bugs = asyncio.run(client.search_related(["内部转账", "重复提交"]))
@@ -1108,7 +1108,7 @@ Run:
 
 Expected: FAIL because `bug_client.py` does not exist.
 
-- [ ] **Step 4: Implement the async Bug API client**
+- [x] **Step 4: Implement the async Bug API client**
 
 Create `agent_service/bug_client.py`:
 
@@ -1146,7 +1146,7 @@ class BugClient:
         return sorted(by_id.values(), key=lambda item: item.bug_id, reverse=True)
 ```
 
-- [ ] **Step 5: Verify and commit data adapters**
+- [x] **Step 5: Verify and commit data adapters**
 
 Run:
 
@@ -1248,7 +1248,7 @@ def test_graph_pauses_for_review_and_resumes(tmp_path: Path) -> None:
         GraphDependencies(
             settings=settings,
             model_provider=provider,
-            bug_client=BugClient("http://unused"),
+            bug_client=BugClient("http://127.0.0.1:8765"),
         ),
         InMemorySaver(),
     )

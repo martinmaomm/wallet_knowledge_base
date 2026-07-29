@@ -1987,7 +1987,7 @@ git commit -m "feat: expose resumable agent through Open WebUI"
 - Consumes: approved `TestPlan`, account aliases, `Settings`.
 - Produces: `ExecutionResult`, screenshots, trace ZIP, `NetworkInventory`.
 
-- [ ] **Step 1: Write failing runner tests against a local fixture page**
+- [x] **Step 1: Write failing runner tests against a local fixture page**
 
 Create `tests/agent/test_runner.py`:
 
@@ -2071,7 +2071,7 @@ Run:
 
 Expected: FAIL because runner modules do not exist.
 
-- [ ] **Step 2: Implement normalized, redacted network collection**
+- [x] **Step 2: Implement normalized, redacted network collection**
 
 Create `agent_service/execution/network.py`:
 
@@ -2108,7 +2108,7 @@ def normalized_path(url: str) -> str:
     return parts.path or "/"
 ```
 
-- [ ] **Step 3: Implement the allowlisted action registry**
+- [x] **Step 3: Implement the allowlisted action registry**
 
 Create `agent_service/execution/runner.py` with:
 
@@ -2252,7 +2252,7 @@ async def run_case(case: TestCase, context: RunnerContext) -> ExecutionResult:
     )
 ```
 
-- [ ] **Step 4: Verify runner isolation**
+- [x] **Step 4: Verify runner isolation**
 
 Append these concrete checks to `tests/agent/test_runner.py`:
 
@@ -2298,7 +2298,7 @@ Run:
 
 Expected: all tests PASS.
 
-- [ ] **Step 5: Commit the deterministic runner**
+- [x] **Step 5: Commit the deterministic runner**
 
 ```bash
 git add agent_service/execution tests/agent/test_runner.py

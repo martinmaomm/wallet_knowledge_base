@@ -106,6 +106,28 @@ openssl rand -hex 32
 `thread_id` 的并发互斥锁属于进程内状态，因此不要增加 `--workers`
 或启动多个 Agent API 实例；多进程并发控制需要后续单独设计。
 
+### Playwright 证据安全
+
+原生 Playwright trace 会记录 `fill` 参数、DOM 快照、网络请求和响应资源，
+其中可能包含测试账号、交易密码、Cookie 或 Token。Runner 因此只把原生
+trace 作为同目录内的短暂中间文件，并在返回结果前执行以下处理：
+
+- 截图使用 Playwright `mask` 遮挡固定账号/密码输入框，以及页面上重复显示
+  的收款账号、付款账号和交易密码文本。
+- 最终 trace 仅保留经过递归脱敏且 `callId` 成对的动作与调用栈元数据。
+- DOM 快照、screencast、原生 network trace 和 `resources/*` 全部删除；
+  接口诊断改用受大小、深度和条目数限制的脱敏 `NetworkInventory`。
+- 净化 ZIP 会逐 entry 扫描账号、密码及其 URL/JSON 编码变体；任何残留
+  都会删除 trace，并把执行结果标记为 `EvidenceCaptureError`。
+- artifact 目录权限固定为 `0700`，文件固定为 `0600`；随机临时文件使用
+  排他创建和 `O_NOFOLLOW`（平台支持时），取消执行也会等待清理完成。
+
+这是有意的安全取舍：净化后的 trace 不具备原生 trace 的完整页面回放和
+响应资源查看能力。本地测试 Agent 优先保证秘密不进入长期产物。路径检查、
+随机文件名和原子替换显著缩小了符号链接竞态窗口，但无法完全防御拥有同一
+系统用户权限、可同时修改 artifact 目录的恶意进程；该场景需要操作系统级
+用户隔离或独立沙箱。
+
 ## 8. 安装 Open WebUI 测试 Agent Pipe
 
 当前 Open WebUI 运行在 Docker Desktop 容器中，而 Agent API 运行在

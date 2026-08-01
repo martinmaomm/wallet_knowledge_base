@@ -1,0 +1,222 @@
+{
+  "extract_requirements": {
+    "scope": "web2_internal_transfer",
+    "requirements": [
+      {
+        "requirement_id": "REQ-001",
+        "statement": "余额不足时禁止内部转账",
+        "source_refs": [
+          "{{SOURCE_ID}}"
+        ],
+        "confirmed": true
+      }
+    ],
+    "missing_rules": []
+  },
+  "analyze_risks": {
+    "ambiguities": [],
+    "risks": [],
+    "bug_queries": []
+  },
+  "generate_test_plan": {
+    "summary": "Web2 internal transfer Golden Set",
+    "cases": [
+      {
+        "case_id": "TC-OTI-001",
+        "title": "内部转账页面正常打开",
+        "priority": "P0",
+        "source_refs": [
+          "人工基准:TC-OTI-001"
+        ],
+        "inferred": false,
+        "rationale": "manual baseline",
+        "preconditions": [],
+        "steps": [
+          {
+            "action": "open_internal_transfer"
+          }
+        ],
+        "assertions": [
+          {
+            "type": "page_loaded"
+          }
+        ]
+      },
+      {
+        "case_id": "TC-OTI-002",
+        "title": "内部转账成功",
+        "priority": "P0",
+        "source_refs": [
+          "人工基准:TC-OTI-002",
+          "{{SOURCE_ID}}"
+        ],
+        "inferred": false,
+        "rationale": "manual baseline",
+        "preconditions": [],
+        "steps": [
+          {
+            "action": "fill_recipient",
+            "source": "recipient_account"
+          },
+          {
+            "action": "fill_amount",
+            "value": "10"
+          },
+          {
+            "action": "complete_security_verification"
+          },
+          {
+            "action": "submit"
+          }
+        ],
+        "assertions": [
+          {
+            "type": "transfer_request_succeeded"
+          },
+          {
+            "type": "payer_balance_decreased",
+            "amount": "10"
+          },
+          {
+            "type": "recipient_balance_increased",
+            "amount": "10"
+          },
+          {
+            "type": "transaction_record_created"
+          }
+        ]
+      },
+      {
+        "case_id": "TC-OTI-003",
+        "title": "收款人不能为空",
+        "priority": "P0",
+        "source_refs": [
+          "人工基准:TC-OTI-003"
+        ],
+        "inferred": false,
+        "rationale": "manual baseline",
+        "preconditions": [],
+        "steps": [
+          {
+            "action": "fill_recipient",
+            "value": ""
+          },
+          {
+            "action": "submit"
+          }
+        ],
+        "assertions": [
+          {
+            "type": "validation_message_equals",
+            "expected": "收款人不能为空"
+          },
+          {
+            "type": "request_not_sent"
+          }
+        ]
+      },
+      {
+        "case_id": "TC-OTI-004",
+        "title": "金额不能为空或为 0",
+        "priority": "P0",
+        "source_refs": [
+          "人工基准:TC-OTI-004"
+        ],
+        "inferred": false,
+        "rationale": "manual baseline",
+        "preconditions": [],
+        "steps": [
+          {
+            "action": "fill_amount",
+            "value": "0"
+          },
+          {
+            "action": "submit"
+          }
+        ],
+        "assertions": [
+          {
+            "type": "validation_message_equals",
+            "expected": "金额必须大于 0"
+          },
+          {
+            "type": "request_not_sent"
+          }
+        ]
+      },
+      {
+        "case_id": "TC-OTI-005",
+        "title": "余额不足时禁止转账",
+        "priority": "P0",
+        "source_refs": [
+          "人工基准:TC-OTI-005"
+        ],
+        "inferred": false,
+        "rationale": "manual baseline",
+        "preconditions": [],
+        "steps": [
+          {
+            "action": "fill_amount",
+            "source": "amount_above_available_balance"
+          },
+          {
+            "action": "submit"
+          }
+        ],
+        "assertions": [
+          {
+            "type": "validation_message_equals",
+            "expected": "余额不足"
+          },
+          {
+            "type": "request_not_sent"
+          }
+        ]
+      },
+      {
+        "case_id": "TC-OTI-006",
+        "title": "重复点击提交只产生一笔交易",
+        "priority": "P0",
+        "source_refs": [
+          "人工基准:TC-OTI-006"
+        ],
+        "inferred": false,
+        "rationale": "manual baseline",
+        "preconditions": [],
+        "steps": [
+          {
+            "action": "fill_recipient",
+            "source": "recipient_account"
+          },
+          {
+            "action": "fill_amount",
+            "value": "10"
+          },
+          {
+            "action": "complete_security_verification"
+          },
+          {
+            "action": "submit"
+          },
+          {
+            "action": "submit"
+          }
+        ],
+        "assertions": [
+          {
+            "type": "single_transaction_created"
+          }
+        ]
+      }
+    ]
+  },
+  "classify_failure": {
+    "category": "product",
+    "summary": "Deterministic assertion failed",
+    "evidence_refs": [
+      "execution_results.json"
+    ],
+    "related_bug_ids": [],
+    "recommended_action": "Review captured request and screenshot"
+  }
+}

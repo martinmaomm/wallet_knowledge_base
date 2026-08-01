@@ -17,6 +17,8 @@
 - Model output must pass Pydantic validation; retry at most twice and then pause.
 - The DSL accepts only registered actions and assertions; arbitrary Python, shell, SQL, URLs, and selectors are rejected.
 - Credentials live only in ignored `.env` and ignored Playwright storage state; never print or persist secret values.
+- Every `/agent/*` request requires a local Bearer token; `/health` is the only
+  unauthenticated Agent endpoint.
 - SQLite stores checkpoints and compact metadata; screenshots, traces, HAR, and reports live under `artifacts/<task_id>/`.
 - The six existing manual internal-transfer cases are the Golden Set and must reach 100% required-case coverage.
 - Inferred cases must carry `inferred=true` and a non-empty rationale.
@@ -105,7 +107,7 @@ knowledge_base/
 - Consumes: existing project root and existing `bug_service`.
 - Produces: `agent_service.config.Settings`, reproducible dependency installation, ignored local configuration.
 
-- [ ] **Step 1: Initialize Git and capture the existing baseline**
+- [x] **Step 1: Initialize Git and capture the existing baseline**
 
 Run:
 
@@ -117,7 +119,7 @@ git commit -m "chore: establish knowledge base baseline"
 
 Expected: `git status --short` returns no tracked changes. The ignored `.venv/` and `data/bugs.sqlite3` are not committed.
 
-- [ ] **Step 2: Write the failing settings test**
+- [x] **Step 2: Write the failing settings test**
 
 Create `tests/agent/test_config.py`:
 
@@ -154,7 +156,13 @@ Run:
 
 Expected: FAIL because `agent_service.config` does not exist.
 
-- [ ] **Step 3: Add pinned dependency ranges and pytest configuration**
+Before implementation, extend the same test module with parameterized RED cases
+for remote or malformed Ollama URLs, malformed allowlist origins, a
+`TEST_BASE_URL` outside the allowlist, Playwright storage state outside
+`playwright/.auth/`, `.env` token loading, and `SecretStr` masking. These cases
+must fail against the minimal implementation and pass only after Step 4.
+
+- [x] **Step 3: Add pinned dependency ranges and pytest configuration**
 
 Append to `requirements.txt`:
 
@@ -187,7 +195,7 @@ Run:
 
 Expected: dependency installation succeeds and Playwright reports Chromium installed.
 
-- [ ] **Step 4: Implement settings and local configuration**
+- [x] **Step 4: Implement settings and local configuration**
 
 Create `agent_service/__init__.py` as an empty UTF-8 file.
 
@@ -197,13 +205,48 @@ Create `agent_service/config.py`:
 from __future__ import annotations
 
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, urlsplit
 
-from pydantic import BaseModel, Field, SecretStr, field_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
+
+
+LOCAL_OLLAMA_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _parse_http_url(value: str, field_name: str) -> SplitResult:
+    parts = urlsplit(value.strip())
+    if parts.scheme.lower() not in {"http", "https"}:
+        raise ValueError(f"{field_name} must use http or https")
+    if not parts.hostname:
+        raise ValueError(f"{field_name} must include a hostname")
+    if parts.username is not None or parts.password is not None:
+        raise ValueError(f"{field_name} must not include userinfo")
+    try:
+        parts.port
+    except ValueError as exc:
+        raise ValueError(f"{field_name} has an invalid port") from exc
+    return parts
+
+
+def _origin_from_parts(parts: SplitResult) -> str:
+    hostname = parts.hostname or ""
+    rendered_host = f"[{hostname}]" if ":" in hostname else hostname
+    port = f":{parts.port}" if parts.port is not None else ""
+    return f"{parts.scheme.lower()}://{rendered_host.lower()}{port}"
+
+
+def _normalize_origin(value: str) -> str:
+    parts = _parse_http_url(value, "allowed_test_origins")
+    if parts.path not in {"", "/"} or parts.query or parts.fragment:
+        raise ValueError(
+            "allowed_test_origins entries must be pure origins without "
+            "path, query, or fragment"
+        )
+    return _origin_from_parts(parts)
 
 
 class Settings(BaseModel):
-    ollama_base_url: str = "http://localhost:11434"
+    ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "qwen3.5:9b"
     bug_service_url: str = "http://localhost:8765"
     test_base_url: str
@@ -215,25 +258,56 @@ class Settings(BaseModel):
     test_payer_account: SecretStr = SecretStr("")
     test_recipient_account: SecretStr = SecretStr("")
     test_transaction_password: SecretStr = SecretStr("")
+    agent_api_token: SecretStr = SecretStr("")
     model_retry_limit: int = 2
     environment_retry_limit: int = 1
+
+    @field_validator("ollama_base_url")
+    @classmethod
+    def ollama_endpoint_must_be_local(cls, value: str) -> str:
+        parts = _parse_http_url(value, "ollama_base_url")
+        if parts.hostname not in LOCAL_OLLAMA_HOSTS:
+            raise ValueError("ollama_base_url must use a local hostname")
+        return value.strip().rstrip("/")
 
     @field_validator("allowed_test_origins")
     @classmethod
     def origins_must_be_explicit(cls, value: list[str]) -> list[str]:
-        normalized = [item.rstrip("/") for item in value if item.strip()]
+        normalized = [_normalize_origin(item) for item in value if item.strip()]
         if not normalized:
             raise ValueError("allowed_test_origins cannot be empty")
         return normalized
 
+    @field_validator("playwright_storage_state")
+    @classmethod
+    def storage_state_must_be_in_ignored_directory(cls, value: Path) -> Path:
+        if value.is_absolute() or ".." in value.parts:
+            raise ValueError(
+                "playwright_storage_state must be a relative path under "
+                "playwright/.auth"
+            )
+        if value.parts[:2] != ("playwright", ".auth") or len(value.parts) < 3:
+            raise ValueError(
+                "playwright_storage_state must be a relative path under "
+                "playwright/.auth"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def test_url_must_use_allowed_origin(self) -> "Settings":
+        origin = self.test_origin
+        if origin not in self.allowed_test_origins:
+            raise ValueError(
+                f"TEST_BASE_URL origin {origin!r} is not in ALLOWED_TEST_ORIGINS"
+            )
+        return self
+
     @property
     def test_origin(self) -> str:
-        parts = urlsplit(self.test_base_url)
-        return f"{parts.scheme}://{parts.netloc}"
+        return _origin_from_parts(_parse_http_url(self.test_base_url, "test_base_url"))
 
     def assert_safe_url(self, url: str) -> None:
-        parts = urlsplit(url)
-        origin = f"{parts.scheme}://{parts.netloc}"
+        origin = _origin_from_parts(_parse_http_url(url, "url"))
         if origin not in self.allowed_test_origins:
             raise ValueError(f"URL origin {origin!r} is not allowlisted")
 
@@ -253,7 +327,9 @@ def load_settings(env_file: str | Path = ".env") -> Settings:
         if item.strip()
     ]
     return Settings(
-        ollama_base_url=str(values.get("OLLAMA_BASE_URL") or "http://localhost:11434"),
+        ollama_base_url=str(
+            values.get("OLLAMA_BASE_URL") or "http://127.0.0.1:11434"
+        ),
         ollama_model=str(values.get("OLLAMA_MODEL") or "qwen3.5:9b"),
         bug_service_url=str(values.get("BUG_SERVICE_URL") or "http://localhost:8765"),
         test_base_url=str(values.get("TEST_BASE_URL") or ""),
@@ -269,13 +345,14 @@ def load_settings(env_file: str | Path = ".env") -> Settings:
         test_transaction_password=str(
             values.get("TEST_TRANSACTION_PASSWORD") or ""
         ),
+        agent_api_token=str(values.get("AGENT_API_TOKEN") or ""),
     )
 ```
 
 Create `.env` with non-secret defaults and empty credential slots:
 
 ```dotenv
-OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_BASE_URL=http://127.0.0.1:11434
 OLLAMA_MODEL=qwen3.5:9b
 BUG_SERVICE_URL=http://localhost:8765
 TEST_BASE_URL=
@@ -287,12 +364,15 @@ AGENT_SOURCE_PATHS=/Users/maoyijiu/Documents/tg-work/测试用例/wallet-web2-te
 TEST_PAYER_ACCOUNT=
 TEST_RECIPIENT_ACCOUNT=
 TEST_TRANSACTION_PASSWORD=
+AGENT_API_TOKEN=
 ```
 
 Add to `.gitignore`:
 
 ```gitignore
 .env
+.DS_Store
+.idea/
 artifacts/
 data/agent.sqlite3
 data/agent.sqlite3-*
@@ -300,7 +380,7 @@ playwright/.auth/
 test-results/
 ```
 
-- [ ] **Step 5: Add the manual start script and verify**
+- [x] **Step 5: Add the manual start script and verify**
 
 Create `scripts/run_agent.sh`:
 
@@ -322,10 +402,12 @@ chmod +x scripts/run_agent.sh
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit the environment baseline**
+- [x] **Step 6: Commit the environment baseline**
 
 ```bash
 git add .gitignore README.md requirements.txt pyproject.toml scripts/run_agent.sh agent_service tests/agent/test_config.py
+git add docs/superpowers/plans/2026-07-28-ai-test-agent-internal-transfer.md
+git add docs/superpowers/specs/2026-07-28-ai-test-agent-internal-transfer-design.md
 git commit -m "build: add local agent development environment"
 ```
 
@@ -344,7 +426,7 @@ git commit -m "build: add local agent development environment"
 - Consumes: `Settings.assert_safe_url`.
 - Produces: `RequirementSet`, `RiskAnalysis`, `TestPlan`, `ApprovalDecision`, `validate_test_plan(plan)`.
 
-- [ ] **Step 1: Write failing DSL validation tests**
+- [x] **Step 1: Write failing DSL validation tests**
 
 Create `tests/agent/test_dsl.py`:
 
@@ -407,7 +489,7 @@ Run:
 
 Expected: FAIL because the schemas do not exist.
 
-- [ ] **Step 2: Implement the domain schemas**
+- [x] **Step 2: Implement the domain schemas**
 
 Create `agent_service/schemas.py` with these public models:
 
@@ -523,7 +605,7 @@ class ApprovalDecision(BaseModel):
     feedback: str = ""
 ```
 
-- [ ] **Step 3: Implement deterministic DSL validation**
+- [x] **Step 3: Implement deterministic DSL validation**
 
 Create `agent_service/dsl.py`:
 
@@ -564,7 +646,10 @@ Create `agent_service/execution/security.py`:
 ```python
 from __future__ import annotations
 
+from secrets import compare_digest
+
 from agent_service.config import Settings
+from agent_service.dsl import plan_fingerprint
 from agent_service.schemas import ApprovalDecision, TestPlan
 
 
@@ -576,11 +661,13 @@ def assert_execution_allowed(
     settings.assert_safe_url(settings.test_base_url)
     if approval is None or approval.action != "approve":
         raise PermissionError("test execution requires an approved decision")
-    if not plan.cases:
-        raise ValueError("approved test plan cannot be empty")
+    if approval.plan_hash is None:
+        raise PermissionError("approved decision requires a plan hash")
+    if not compare_digest(approval.plan_hash, plan_fingerprint(plan)):
+        raise PermissionError("approved plan hash does not match current plan")
 ```
 
-- [ ] **Step 4: Run and extend the safety tests**
+- [x] **Step 4: Run and extend the safety tests**
 
 Add to `tests/agent/test_dsl.py`:
 
@@ -588,6 +675,7 @@ Add to `tests/agent/test_dsl.py`:
 from pathlib import Path
 
 from agent_service.config import Settings
+from agent_service.dsl import plan_fingerprint
 from agent_service.execution.security import assert_execution_allowed
 from agent_service.schemas import ApprovalDecision
 
@@ -599,6 +687,7 @@ def test_execution_is_blocked_before_approval(tmp_path: Path) -> None:
         source_paths=[],
         agent_db_path=tmp_path / "agent.sqlite3",
         artifacts_dir=tmp_path / "artifacts",
+        agent_api_token="test-agent-token",
     )
     with pytest.raises(PermissionError, match="approved"):
         assert_execution_allowed(settings, make_plan(), None)
@@ -606,7 +695,10 @@ def test_execution_is_blocked_before_approval(tmp_path: Path) -> None:
     assert_execution_allowed(
         settings,
         make_plan(),
-        ApprovalDecision(action="approve"),
+        ApprovalDecision(
+            action="approve",
+            plan_hash=plan_fingerprint(make_plan()),
+        ),
     )
 ```
 
@@ -618,7 +710,7 @@ Run:
 
 Expected: all tests PASS.
 
-- [ ] **Step 5: Commit schemas and safety rules**
+- [x] **Step 5: Commit schemas and safety rules**
 
 ```bash
 git add agent_service/schemas.py agent_service/dsl.py agent_service/execution tests/agent/test_dsl.py
@@ -638,7 +730,7 @@ git commit -m "feat: define safe internal transfer test DSL"
 - Consumes: any Pydantic output schema.
 - Produces: `ModelProvider.generate_structured(task_type, prompt, schema)`, `OllamaProvider`, `FakeModelProvider`.
 
-- [ ] **Step 1: Write failing provider contract tests**
+- [x] **Step 1: Write failing provider contract tests**
 
 Create `tests/agent/test_model_provider.py`:
 
@@ -694,7 +786,7 @@ Run:
 
 Expected: FAIL because `model_provider.py` does not exist.
 
-- [ ] **Step 2: Implement the provider protocol and retry boundary**
+- [x] **Step 2: Implement the provider protocol and retry boundary**
 
 Create `agent_service/model_provider.py`:
 
@@ -799,7 +891,7 @@ Create `tests/agent/fixtures/model_outputs.json`:
 }
 ```
 
-- [ ] **Step 3: Add the Ollama implementation without cloud fallback**
+- [x] **Step 3: Add the Ollama implementation without cloud fallback**
 
 Append to `agent_service/model_provider.py`:
 
@@ -850,18 +942,18 @@ class OllamaProvider:
         )
 ```
 
-- [ ] **Step 4: Verify fake and real provider boundaries**
+- [x] **Step 4: Verify fake and real provider boundaries**
 
 Run:
 
 ```bash
 .venv/bin/python -m pytest tests/agent/test_model_provider.py -v
-.venv/bin/python -c "from agent_service.model_provider import OllamaProvider; OllamaProvider(base_url='http://localhost:11434', model='qwen3.5:9b')"
+.venv/bin/python -c "from agent_service.model_provider import OllamaProvider; OllamaProvider(base_url='http://127.0.0.1:11434', model='qwen3.5:9b')"
 ```
 
 Expected: tests PASS and the constructor command exits with code 0 without calling the model.
 
-- [ ] **Step 5: Commit the provider abstraction**
+- [x] **Step 5: Commit the provider abstraction**
 
 ```bash
 git add agent_service/model_provider.py tests/agent/test_model_provider.py tests/agent/fixtures
@@ -883,7 +975,7 @@ git commit -m "feat: add replaceable local model provider"
 - Consumes: configured source paths and `bug_service` HTTP API.
 - Produces: `load_sources(paths) -> LoadedSources`, `BugClient.search_related(queries) -> list[RelatedBug]`.
 
-- [ ] **Step 1: Write failing source-loader tests**
+- [x] **Step 1: Write failing source-loader tests**
 
 Create `tests/agent/fixtures/web2_internal_transfer.md`:
 
@@ -921,7 +1013,7 @@ Run:
 
 Expected: FAIL because `sources.py` does not exist.
 
-- [ ] **Step 2: Implement deterministic source loading**
+- [x] **Step 2: Implement deterministic source loading**
 
 Create `agent_service/sources.py`:
 
@@ -969,7 +1061,7 @@ def load_sources(paths: list[Path]) -> LoadedSources:
     return LoadedSources(documents=documents)
 ```
 
-- [ ] **Step 3: Write the bug-client contract test**
+- [x] **Step 3: Write the bug-client contract test**
 
 Create `tests/agent/test_bug_client.py`:
 
@@ -1001,7 +1093,7 @@ def test_bug_client_deduplicates_results() -> None:
         )
 
     client = BugClient(
-        "http://bug-service",
+        "http://127.0.0.1:8765",
         transport=httpx.MockTransport(handler),
     )
     bugs = asyncio.run(client.search_related(["内部转账", "重复提交"]))
@@ -1016,7 +1108,7 @@ Run:
 
 Expected: FAIL because `bug_client.py` does not exist.
 
-- [ ] **Step 4: Implement the async Bug API client**
+- [x] **Step 4: Implement the async Bug API client**
 
 Create `agent_service/bug_client.py`:
 
@@ -1054,7 +1146,7 @@ class BugClient:
         return sorted(by_id.values(), key=lambda item: item.bug_id, reverse=True)
 ```
 
-- [ ] **Step 5: Verify and commit data adapters**
+- [x] **Step 5: Verify and commit data adapters**
 
 Run:
 
@@ -1088,7 +1180,7 @@ git commit -m "feat: load versioned sources and related bugs"
 - Consumes: `Settings`, `ModelProvider`, `BugClient`, source loader, schemas.
 - Produces: `build_graph(deps, checkpointer)`, resumable graph state keyed by `thread_id`.
 
-- [ ] **Step 1: Write the failing approval and resume graph test**
+- [x] **Step 1: Write the failing approval and resume graph test**
 
 Create `tests/agent/test_graph.py`:
 
@@ -1150,12 +1242,13 @@ def test_graph_pauses_for_review_and_resumes(tmp_path: Path) -> None:
         source_paths=[Path("tests/agent/fixtures/web2_internal_transfer.md")],
         agent_db_path=tmp_path / "agent.sqlite3",
         artifacts_dir=tmp_path / "artifacts",
+        agent_api_token="test-agent-token",
     )
     graph = build_graph(
         GraphDependencies(
             settings=settings,
             model_provider=provider,
-            bug_client=BugClient("http://unused"),
+            bug_client=BugClient("http://127.0.0.1:8765"),
         ),
         InMemorySaver(),
     )
@@ -1183,7 +1276,7 @@ Run:
 
 Expected: FAIL because the graph modules do not exist.
 
-- [ ] **Step 2: Define graph state and dependencies**
+- [x] **Step 2: Define graph state and dependencies**
 
 Create `agent_service/graph/state.py`:
 
@@ -1220,7 +1313,7 @@ from langgraph.types import interrupt
 
 from agent_service.bug_client import BugClient
 from agent_service.config import Settings
-from agent_service.dsl import validate_test_plan
+from agent_service.dsl import plan_fingerprint, validate_test_plan
 from agent_service.model_provider import ModelProvider
 from agent_service.schemas import ApprovalDecision, RequirementSet, RiskAnalysis, TestPlan
 from agent_service.sources import load_sources, read_prompt
@@ -1292,7 +1385,7 @@ def make_nodes(deps: GraphDependencies) -> dict[str, object]:
         return {"test_plan": plan.model_dump(), "status": "plan_validated"}
 
     def human_review(state: dict) -> dict:
-        decision = ApprovalDecision.model_validate(
+        payload = dict(
             interrupt(
                 {
                     "task_id": state["task_id"],
@@ -1301,6 +1394,11 @@ def make_nodes(deps: GraphDependencies) -> dict[str, object]:
                 }
             )
         )
+        if payload.get("action") == "approve":
+            payload["plan_hash"] = plan_fingerprint(
+                TestPlan.model_validate(state["test_plan"])
+            )
+        decision = ApprovalDecision.model_validate(payload)
         next_status = "approved" if decision.action == "approve" else decision.action
         return {"approval": decision.model_dump(), "status": next_status}
 
@@ -1314,7 +1412,7 @@ def make_nodes(deps: GraphDependencies) -> dict[str, object]:
     }
 ```
 
-- [ ] **Step 3: Build the first graph through approval**
+- [x] **Step 3: Build the first graph through approval**
 
 Create `agent_service/graph/build.py`:
 
@@ -1348,7 +1446,7 @@ def build_graph(deps: GraphDependencies, checkpointer):
 
 Create `agent_service/graph/__init__.py` as an empty file.
 
-- [ ] **Step 4: Store prompts as versioned files and wire them into nodes**
+- [x] **Step 4: Store prompts as versioned files and wire them into nodes**
 
 Create the four prompt files with explicit rules:
 
@@ -1402,7 +1500,7 @@ def read_prompt(name: str) -> str:
     return (PROMPTS_DIR / f"{name}.md").read_text(encoding="utf-8")
 ```
 
-- [ ] **Step 5: Run graph tests and commit**
+- [x] **Step 5: Run graph tests and commit**
 
 ```bash
 .venv/bin/python -m pytest tests/agent/test_graph.py -v
@@ -1430,7 +1528,7 @@ git commit -m "feat: orchestrate analysis and human approval"
 - Consumes: compiled graph and Open WebUI `chat_id`.
 - Produces: `POST /agent/messages`, `GET /agent/tasks/{thread_id}`, Open WebUI `Pipe`.
 
-- [ ] **Step 1: Write failing API lifecycle tests**
+- [x] **Step 1: Write failing API lifecycle tests**
 
 Create `tests/agent/test_api.py`:
 
@@ -1452,18 +1550,20 @@ def test_agent_api_starts_and_approves_task(tmp_path: Path) -> None:
         source_paths=[Path("tests/agent/fixtures/web2_internal_transfer.md")],
         agent_db_path=tmp_path / "agent.sqlite3",
         artifacts_dir=tmp_path / "artifacts",
+        agent_api_token="test-agent-token",
     )
     provider = FakeModelProvider.from_fixture(
         Path("tests/agent/fixtures/model_outputs.json")
     )
     app = create_app(settings=settings, model_provider=provider)
 
-    async def exercise() -> None:
+    async def exercise_requests() -> None:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             first = await client.post(
                 "/agent/messages",
                 json={"thread_id": "chat-1", "message": "测试内部转账"},
+                headers={"Authorization": "Bearer test-agent-token"},
             )
             assert first.status_code == 200
             assert first.json()["status"] == "waiting_approval"
@@ -1471,9 +1571,62 @@ def test_agent_api_starts_and_approves_task(tmp_path: Path) -> None:
             approved = await client.post(
                 "/agent/messages",
                 json={"thread_id": "chat-1", "message": "批准"},
+                headers={"Authorization": "Bearer test-agent-token"},
             )
             assert approved.status_code == 200
             assert approved.json()["status"] == "approved"
+
+            missing = await client.post(
+                "/agent/messages",
+                json={"thread_id": "chat-2", "message": "测试内部转账"},
+            )
+            assert missing.status_code == 401
+
+            wrong = await client.post(
+                "/agent/messages",
+                json={"thread_id": "chat-3", "message": "测试内部转账"},
+                headers={"Authorization": "Bearer wrong-token"},
+            )
+            assert wrong.status_code == 401
+
+    async def exercise() -> None:
+        async with app.router.lifespan_context(app):
+            await exercise_requests()
+
+    asyncio.run(exercise())
+
+
+def test_agent_api_refuses_unconfigured_token(tmp_path: Path) -> None:
+    settings = Settings(
+        test_base_url="https://wallet-test.local",
+        allowed_test_origins=["https://wallet-test.local"],
+        source_paths=[Path("tests/agent/fixtures/web2_internal_transfer.md")],
+        agent_db_path=tmp_path / "agent.sqlite3",
+        artifacts_dir=tmp_path / "artifacts",
+    )
+    app = create_app(
+        settings=settings,
+        model_provider=FakeModelProvider.from_fixture(
+            Path("tests/agent/fixtures/model_outputs.json")
+        ),
+    )
+
+    async def exercise_requests() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                "/agent/messages",
+                json={"thread_id": "chat-1", "message": "测试内部转账"},
+                headers={"Authorization": "Bearer any-token"},
+            )
+            assert response.status_code == 503
+
+    async def exercise() -> None:
+        async with app.router.lifespan_context(app):
+            await exercise_requests()
 
     asyncio.run(exercise())
 ```
@@ -1486,18 +1639,24 @@ Run:
 
 Expected: FAIL because the Agent API does not exist.
 
-- [ ] **Step 2: Implement the API with persistent SQLite checkpoints**
+- [x] **Step 2: Implement the API with persistent SQLite checkpoints**
+
+FastAPI 的异步请求路径必须使用 `AsyncSqliteSaver`，并在应用 lifespan
+内创建和关闭连接。状态读取使用 `await graph.aget_state(...)`；禁止在
+事件循环中使用同步 `SqliteSaver`、同步 SQLite 连接或同步
+`graph.get_state(...)`。
 
 Create `agent_service/api.py`:
 
 ```python
 from __future__ import annotations
 
-import sqlite3
 from contextlib import asynccontextmanager
+from secrets import compare_digest
+from typing import Any
 
-from fastapi import FastAPI, HTTPException
-from langgraph.checkpoint.sqlite import SqliteSaver
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command
 from pydantic import BaseModel
 
@@ -1511,6 +1670,24 @@ from agent_service.schemas import ApprovalDecision
 class AgentMessage(BaseModel):
     thread_id: str
     message: str
+
+
+def safe_interrupts(snapshot: Any) -> list[dict[str, str]]:
+    rendered: list[dict[str, str]] = []
+    for task in snapshot.tasks:
+        for pending in task.interrupts:
+            value = pending.value
+            status = value.get("status") if isinstance(value, dict) else None
+            if status == "waiting_approval":
+                rendered.append({"status": "waiting_approval"})
+            elif status == "invalid_approval":
+                rendered.append(
+                    {
+                        "status": "invalid_approval",
+                        "message": "审批输入或方案无效，请重新操作。",
+                    }
+                )
+    return rendered
 
 
 def parse_decision(message: str) -> ApprovalDecision | None:
@@ -1536,28 +1713,38 @@ def create_app(
 ) -> FastAPI:
     configured = settings or load_settings()
     configured.agent_db_path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(configured.agent_db_path, check_same_thread=False)
-    checkpointer = SqliteSaver(connection)
     provider = model_provider or OllamaProvider(
         base_url=configured.ollama_base_url,
         model=configured.ollama_model,
         retry_limit=configured.model_retry_limit,
     )
-    graph = build_graph(
-        GraphDependencies(
-            settings=configured,
-            model_provider=provider,
-            bug_client=BugClient(configured.bug_service_url),
-        ),
-        checkpointer,
-    )
 
     @asynccontextmanager
-    async def lifespan(_: FastAPI):
-        yield
-        connection.close()
+    async def lifespan(app: FastAPI):
+        async with AsyncSqliteSaver.from_conn_string(
+            str(configured.agent_db_path)
+        ) as checkpointer:
+            await checkpointer.setup()
+            app.state.graph = build_graph(
+                GraphDependencies(
+                    settings=configured,
+                    model_provider=provider,
+                    bug_client=BugClient(configured.bug_service_url),
+                ),
+                checkpointer,
+            )
+            yield
 
     app = FastAPI(title="Local AI Test Agent", version="0.1.0", lifespan=lifespan)
+
+    async def require_agent_token(
+        authorization: str | None = Header(default=None),
+    ) -> None:
+        expected = configured.agent_api_token.get_secret_value()
+        if not expected:
+            raise HTTPException(503, "AGENT_API_TOKEN is not configured")
+        if not compare_digest(authorization or "", f"Bearer {expected}"):
+            raise HTTPException(401, "invalid Agent API token")
 
     @app.get("/health")
     async def health() -> dict:
@@ -1568,43 +1755,71 @@ def create_app(
             "cloud_model_calls": 0,
         }
 
-    @app.post("/agent/messages")
-    async def messages(request: AgentMessage) -> dict:
-        config = {"configurable": {"thread_id": request.thread_id}}
-        snapshot = graph.get_state(config)
-        decision = parse_decision(request.message)
+    @app.post(
+        "/agent/messages",
+        dependencies=[Depends(require_agent_token)],
+    )
+    async def messages(message: AgentMessage, request: Request) -> dict:
+        graph = request.app.state.graph
+        config = {"configurable": {"thread_id": message.thread_id}}
+        snapshot = await graph.aget_state(config)
+        current_interrupts = safe_interrupts(snapshot)
+        interrupted = bool(current_interrupts)
+        decision = parse_decision(message.message)
         if decision:
-            if not snapshot.next:
+            if not interrupted:
                 raise HTTPException(409, "thread is not waiting for approval")
             result = await graph.ainvoke(
                 Command(resume=decision.model_dump()),
                 config=config,
             )
         else:
-            if snapshot.values and snapshot.next:
+            if snapshot.values and interrupted:
                 raise HTTPException(409, "thread is waiting for approval")
             result = await graph.ainvoke(
                 {
-                    "thread_id": request.thread_id,
-                    "user_message": request.message,
+                    "thread_id": message.thread_id,
+                    "user_message": message.message,
                 },
                 config=config,
             )
-        state = graph.get_state(config)
-        interrupted = bool(state.next)
+        state = await graph.aget_state(config)
+        current_interrupts = safe_interrupts(state)
+        interrupted = bool(current_interrupts)
         return {
-            "thread_id": request.thread_id,
+            "thread_id": message.thread_id,
             "task_id": state.values.get("task_id"),
-            "status": "waiting_approval" if interrupted else result.get("status"),
+            "status": (
+                current_interrupts[-1]["status"]
+                if interrupted
+                else result.get("status")
+            ),
             "message": render_chat_message(state.values, interrupted=interrupted),
         }
 
-    @app.get("/agent/tasks/{thread_id}")
-    async def task(thread_id: str) -> dict:
-        state = graph.get_state({"configurable": {"thread_id": thread_id}})
+    @app.get(
+        "/agent/tasks/{thread_id}",
+        dependencies=[Depends(require_agent_token)],
+    )
+    async def task(thread_id: str, request: Request) -> dict:
+        graph = request.app.state.graph
+        state = await graph.aget_state(
+            {"configurable": {"thread_id": thread_id}}
+        )
         if not state.values:
             raise HTTPException(404, "task not found")
-        return {"values": state.values, "next": list(state.next)}
+        current_interrupts = safe_interrupts(state)
+        return {
+            "values": state.values,
+            "next": list(state.next),
+            "interrupts": current_interrupts,
+            "status": (
+                current_interrupts[-1]["status"]
+                if current_interrupts
+                else state.values.get("status")
+            ),
+            "waiting": bool(current_interrupts),
+        }
 
     return app
 
@@ -1619,7 +1834,7 @@ def render_chat_message(state: dict, *, interrupted: bool) -> str:
     return f"任务 {state.get('task_id')} 当前状态：{state.get('status')}"
 ```
 
-- [ ] **Step 3: Implement the thin Open WebUI Pipe**
+- [x] **Step 3: Implement the thin Open WebUI Pipe**
 
 Create `agent_service/integrations/__init__.py` as an empty file.
 
@@ -1637,6 +1852,10 @@ class Pipe:
         AGENT_BASE_URL: str = Field(
             default="http://host.docker.internal:8770",
             description="Local AI Test Agent service URL",
+        )
+        AGENT_API_TOKEN: str = Field(
+            default="",
+            description="Bearer token from the Agent service .env",
         )
 
     def __init__(self):
@@ -1661,13 +1880,16 @@ class Pipe:
             response = await client.post(
                 f"{self.valves.AGENT_BASE_URL.rstrip('/')}/agent/messages",
                 json={"thread_id": chat_id, "message": message},
+                headers={
+                    "Authorization": f"Bearer {self.valves.AGENT_API_TOKEN}",
+                },
             )
         if response.status_code >= 400:
             return f"测试 Agent 调用失败：{response.status_code} {response.text}"
         return response.json()["message"]
 ```
 
-- [ ] **Step 4: Add Pipe tests and persistent restart verification**
+- [x] **Step 4: Add Pipe tests and persistent restart verification**
 
 Create `tests/agent/test_openwebui_pipe.py`:
 
@@ -1683,10 +1905,12 @@ def test_pipe_forwards_chat_id_and_user_prompt() -> None:
     captured: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        captured.update(__import__("json").loads(request.content))
+        captured["body"] = __import__("json").loads(request.content)
+        captured["authorization"] = request.headers["Authorization"]
         return httpx.Response(200, json={"message": "等待审批"})
 
     pipe = Pipe()
+    pipe.valves.AGENT_API_TOKEN = "test-agent-token"
     pipe.client_factory = lambda **kwargs: httpx.AsyncClient(
         transport=httpx.MockTransport(handler),
         timeout=kwargs["timeout"],
@@ -1702,8 +1926,11 @@ def test_pipe_forwards_chat_id_and_user_prompt() -> None:
     )
     assert result == "等待审批"
     assert captured == {
-        "thread_id": "chat-1",
-        "message": "测试内部转账",
+        "body": {
+            "thread_id": "chat-1",
+            "message": "测试内部转账",
+        },
+        "authorization": "Bearer test-agent-token",
     }
 ```
 
@@ -1718,8 +1945,13 @@ Expected: PASS.
 Run a manual persistence smoke:
 
 ```bash
+export AGENT_API_TOKEN="$(
+  .venv/bin/python -c \
+  'from dotenv import dotenv_values; print(dotenv_values(".env")["AGENT_API_TOKEN"])'
+)"
 scripts/run_agent.sh
 curl -sS -X POST http://localhost:8770/agent/messages \
+  -H "Authorization: Bearer ${AGENT_API_TOKEN}" \
   -H 'Content-Type: application/json' \
   -d '{"thread_id":"manual-1","message":"测试内部转账"}'
 ```
@@ -1728,6 +1960,7 @@ Expected: JSON status `waiting_approval`. Stop and restart the Agent, then:
 
 ```bash
 curl -sS -X POST http://localhost:8770/agent/messages \
+  -H "Authorization: Bearer ${AGENT_API_TOKEN}" \
   -H 'Content-Type: application/json' \
   -d '{"thread_id":"manual-1","message":"批准"}'
 ```
@@ -1754,7 +1987,7 @@ git commit -m "feat: expose resumable agent through Open WebUI"
 - Consumes: approved `TestPlan`, account aliases, `Settings`.
 - Produces: `ExecutionResult`, screenshots, trace ZIP, `NetworkInventory`.
 
-- [ ] **Step 1: Write failing runner tests against a local fixture page**
+- [x] **Step 1: Write failing runner tests against a local fixture page**
 
 Create `tests/agent/test_runner.py`:
 
@@ -1838,7 +2071,7 @@ Run:
 
 Expected: FAIL because runner modules do not exist.
 
-- [ ] **Step 2: Implement normalized, redacted network collection**
+- [x] **Step 2: Implement normalized, redacted network collection**
 
 Create `agent_service/execution/network.py`:
 
@@ -1875,7 +2108,7 @@ def normalized_path(url: str) -> str:
     return parts.path or "/"
 ```
 
-- [ ] **Step 3: Implement the allowlisted action registry**
+- [x] **Step 3: Implement the allowlisted action registry**
 
 Create `agent_service/execution/runner.py` with:
 
@@ -2019,7 +2252,7 @@ async def run_case(case: TestCase, context: RunnerContext) -> ExecutionResult:
     )
 ```
 
-- [ ] **Step 4: Verify runner isolation**
+- [x] **Step 4: Verify runner isolation**
 
 Append these concrete checks to `tests/agent/test_runner.py`:
 
@@ -2065,7 +2298,7 @@ Run:
 
 Expected: all tests PASS.
 
-- [ ] **Step 5: Commit the deterministic runner**
+- [x] **Step 5: Commit the deterministic runner**
 
 ```bash
 git add agent_service/execution tests/agent/test_runner.py
@@ -2088,7 +2321,7 @@ git commit -m "feat: execute approved DSL with Playwright"
 - Consumes: before/after snapshots, network entries, deterministic assertions.
 - Produces: `AssertionResult`, final case status, schema-constrained `FailureAnalysis`.
 
-- [ ] **Step 1: Write failing precision and idempotency tests**
+- [x] **Step 1: Write failing precision and idempotency tests**
 
 Create `tests/agent/test_assertions.py`:
 
@@ -2132,7 +2365,7 @@ Run:
 
 Expected: FAIL because assertion helpers do not exist.
 
-- [ ] **Step 2: Implement deterministic assertion results**
+- [x] **Step 2: Implement deterministic assertion results**
 
 Create `agent_service/execution/assertions.py`:
 
@@ -2180,7 +2413,7 @@ def assert_single_transaction(
     )
 ```
 
-- [ ] **Step 3: Add failure-analysis schema and node**
+- [x] **Step 3: Add failure-analysis schema and node**
 
 Append to `agent_service/schemas.py`:
 
@@ -2215,7 +2448,7 @@ async def classify_failure(state: dict) -> dict:
 
 The node may classify and explain the failure but cannot change `passed=False`. Add `passed`, `assertion_results`, `execution_results`, and `failure_analysis` to `AgentState`.
 
-- [ ] **Step 4: Extend the graph after approval**
+- [x] **Step 4: Extend the graph after approval**
 
 Add nodes and edges:
 
@@ -2238,7 +2471,7 @@ Update graph tests with fake execution dependencies so:
 - passed assertion never invokes `classify_failure`;
 - deterministic `passed` cannot be overwritten by the model.
 
-- [ ] **Step 5: Run and commit assertion integration**
+- [x] **Step 5: Run and commit assertion integration**
 
 ```bash
 .venv/bin/python -m pytest tests/agent/test_assertions.py tests/agent/test_graph.py -v
@@ -2264,7 +2497,7 @@ git commit -m "feat: verify transfer outcomes and classify failures"
 - Consumes: complete graph state.
 - Produces: atomic JSON artifacts, `report.md`, `report.html`, coverage metrics.
 
-- [ ] **Step 1: Write failing artifact and coverage tests**
+- [x] **Step 1: Write failing artifact and coverage tests**
 
 Create `tests/agent/test_reporting.py`:
 
@@ -2311,7 +2544,7 @@ Run:
 
 Expected: FAIL because reporting modules do not exist.
 
-- [ ] **Step 2: Implement atomic artifact writes**
+- [x] **Step 2: Implement atomic artifact writes**
 
 Create `agent_service/artifacts.py`:
 
@@ -2334,7 +2567,7 @@ def atomic_write_json(path: Path, value: Any) -> None:
     os.replace(temporary, path)
 ```
 
-- [ ] **Step 3: Implement evaluation and human-readable reports**
+- [x] **Step 3: Implement evaluation and human-readable reports**
 
 Create `agent_service/reporting.py`:
 
@@ -2396,7 +2629,7 @@ def write_reports(
     }
 ```
 
-- [ ] **Step 4: Add graph report integration and redaction checks**
+- [x] **Step 4: Add graph report integration and redaction checks**
 
 Update `generate_report` to write:
 
@@ -2466,7 +2699,13 @@ git commit -m "feat: generate traceable local test reports"
 - Consumes: all completed Agent components and configured test environment.
 - Produces: one real approved internal-transfer run, reproducible demo commands, portfolio evidence.
 
-- [ ] **Step 1: Add an opt-in real-environment E2E test**
+> 2026-08-01 progress: the opt-in E2E test and CLI wrapper are complete. Real
+> environment acceptance remains blocked until the wallet URL, test credentials,
+> saved authentication state, site selectors, and production
+> `ExecutionBackend` assembly are available. Mock execution is not accepted as
+> portfolio evidence.
+
+- [x] **Step 1: Add an opt-in real-environment E2E test**
 
 Create `tests/e2e/test_internal_transfer_agent.py`:
 
@@ -2475,19 +2714,23 @@ import os
 
 import httpx
 import pytest
+from dotenv import load_dotenv
 
 
 pytestmark = pytest.mark.e2e
+load_dotenv()
 
 
 class RealAgentClient:
-    def __init__(self, base_url: str):
+    def __init__(self, base_url: str, token: str):
         self.base_url = base_url.rstrip("/")
+        self.token = token
 
     def send(self, thread_id: str, message: str) -> dict:
         response = httpx.post(
             f"{self.base_url}/agent/messages",
             json={"thread_id": thread_id, "message": message},
+            headers={"Authorization": f"Bearer {self.token}"},
             timeout=600,
         )
         response.raise_for_status()
@@ -2497,9 +2740,10 @@ class RealAgentClient:
 @pytest.fixture
 def real_agent_client() -> RealAgentClient:
     base_url = os.getenv("AGENT_BASE_URL", "http://localhost:8770")
+    token = os.environ["AGENT_API_TOKEN"]
     response = httpx.get(f"{base_url}/health", timeout=10)
     response.raise_for_status()
-    return RealAgentClient(base_url)
+    return RealAgentClient(base_url, token)
 
 
 @pytest.mark.skipif(
@@ -2516,7 +2760,7 @@ def test_internal_transfer_full_agent_flow(real_agent_client) -> None:
     assert completed["summary"]["cloud_model_calls"] == 0
 ```
 
-- [ ] **Step 2: Create a command-line demo wrapper**
+- [x] **Step 2: Create a command-line demo wrapper**
 
 Create `scripts/run_internal_transfer_demo.py`:
 
@@ -2525,11 +2769,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 
 import httpx
+from dotenv import load_dotenv
 
 
 def main() -> None:
+    load_dotenv()
     parser = argparse.ArgumentParser()
     parser.add_argument("--thread-id", default="portfolio-demo")
     parser.add_argument("--approve", action="store_true")
@@ -2538,6 +2785,9 @@ def main() -> None:
     response = httpx.post(
         "http://localhost:8770/agent/messages",
         json={"thread_id": args.thread_id, "message": message},
+        headers={
+            "Authorization": f"Bearer {os.environ['AGENT_API_TOKEN']}",
+        },
         timeout=300,
     )
     response.raise_for_status()
@@ -2557,7 +2807,8 @@ Use the content of `agent_service/integrations/openwebui_pipe.py`:
 3. Review the code and save it.
 4. Enable the Function.
 5. Set `AGENT_BASE_URL=http://host.docker.internal:8770`.
-6. Select `AI Test Agent` as the chat model.
+6. Set `AGENT_API_TOKEN` to the same local token stored in the Agent `.env`.
+7. Select `AI Test Agent` as the chat model.
 
 Expected: sending `测试 Web2 内部转账` returns a task summary and waits for approval. Sending `批准` in the same chat resumes the same LangGraph thread.
 

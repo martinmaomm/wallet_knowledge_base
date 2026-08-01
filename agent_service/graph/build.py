@@ -141,7 +141,27 @@ def build_graph(
     builder.add_edge("analyze_risks", "retrieve_bugs")
     builder.add_edge("retrieve_bugs", "generate_test_plan")
     builder.add_edge("generate_test_plan", "human_review")
-    builder.add_edge("human_review", END)
+    builder.add_conditional_edges(
+        "human_review",
+        lambda state: (
+            "execute"
+            if state.get("approval", {}).get("action") == "approve"
+            else "finish"
+        ),
+        {
+            "execute": "execute_tests",
+            "finish": END,
+        },
+    )
+    builder.add_conditional_edges(
+        "execute_tests",
+        lambda state: "finish" if state.get("passed") is True else "classify",
+        {
+            "finish": END,
+            "classify": "classify_failure",
+        },
+    )
+    builder.add_edge("classify_failure", END)
     return ValidatedCompiledGraph(
         builder.compile(checkpointer=checkpointer)
     )

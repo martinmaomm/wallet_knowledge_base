@@ -33,6 +33,7 @@ from agent_service.graph.build import (
     build_graph,
     validate_thread_id,
 )
+from agent_service.graph.nodes import ExecutionBackend
 from agent_service.model_provider import ModelProvider, OllamaProvider
 from agent_service.schemas import ApprovalDecision
 
@@ -51,6 +52,8 @@ SAFE_STATE_STATUSES = frozenset(
         "reject",
         "supplement",
         "cancel",
+        "completed",
+        "failure_classified",
     }
 )
 TASK_ID_PATTERN = re.compile(r"^TASK-[0-9a-f]{12}$")
@@ -289,6 +292,7 @@ def create_app(
     settings: Settings | None = None,
     model_provider: ModelProvider | None = None,
     bug_client: BugSearchClient | None = None,
+    execution_backend: ExecutionBackend | None = None,
     checkpointer_factory: CheckpointerFactory | None = None,
 ) -> FastAPI:
     configured = settings or load_settings()
@@ -321,6 +325,7 @@ def create_app(
                     settings=configured,
                     model_provider=provider,
                     bug_client=configured_bug_client,
+                    execution_backend=execution_backend,
                 ),
                 checkpointer,
             )

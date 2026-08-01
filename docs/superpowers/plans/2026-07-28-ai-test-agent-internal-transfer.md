@@ -2321,7 +2321,7 @@ git commit -m "feat: execute approved DSL with Playwright"
 - Consumes: before/after snapshots, network entries, deterministic assertions.
 - Produces: `AssertionResult`, final case status, schema-constrained `FailureAnalysis`.
 
-- [ ] **Step 1: Write failing precision and idempotency tests**
+- [x] **Step 1: Write failing precision and idempotency tests**
 
 Create `tests/agent/test_assertions.py`:
 
@@ -2365,7 +2365,7 @@ Run:
 
 Expected: FAIL because assertion helpers do not exist.
 
-- [ ] **Step 2: Implement deterministic assertion results**
+- [x] **Step 2: Implement deterministic assertion results**
 
 Create `agent_service/execution/assertions.py`:
 
@@ -2413,7 +2413,7 @@ def assert_single_transaction(
     )
 ```
 
-- [ ] **Step 3: Add failure-analysis schema and node**
+- [x] **Step 3: Add failure-analysis schema and node**
 
 Append to `agent_service/schemas.py`:
 
@@ -2448,7 +2448,7 @@ async def classify_failure(state: dict) -> dict:
 
 The node may classify and explain the failure but cannot change `passed=False`. Add `passed`, `assertion_results`, `execution_results`, and `failure_analysis` to `AgentState`.
 
-- [ ] **Step 4: Extend the graph after approval**
+- [x] **Step 4: Extend the graph after approval**
 
 Add nodes and edges:
 
@@ -2471,7 +2471,7 @@ Update graph tests with fake execution dependencies so:
 - passed assertion never invokes `classify_failure`;
 - deterministic `passed` cannot be overwritten by the model.
 
-- [ ] **Step 5: Run and commit assertion integration**
+- [x] **Step 5: Run and commit assertion integration**
 
 ```bash
 .venv/bin/python -m pytest tests/agent/test_assertions.py tests/agent/test_graph.py -v

@@ -11,8 +11,13 @@ from langgraph.types import Command
 
 from agent_service.api import create_app
 from agent_service.config import Settings
+from agent_service.execution.assertions import (
+    AssertionResult,
+    ExecutionBackendResult,
+)
+from agent_service.execution.runner import ExecutionResult
 from agent_service.model_provider import FakeModelProvider
-from agent_service.schemas import RelatedBug
+from agent_service.schemas import RelatedBug, TestPlan as GeneratedTestPlan
 from agent_service.sources import load_sources
 
 
@@ -36,6 +41,35 @@ class StubBugClient:
 class FailingModelProvider:
     async def generate_structured(self, **_: Any) -> Any:
         raise AssertionError("a resumed task must not call the model")
+
+
+class FakeExecutionBackend:
+    def __init__(self) -> None:
+        self.calls: list[GeneratedTestPlan] = []
+
+    async def execute(
+        self,
+        plan: GeneratedTestPlan,
+    ) -> ExecutionBackendResult:
+        self.calls.append(plan)
+        return ExecutionBackendResult(
+            execution_results=[
+                ExecutionResult(
+                    case_id=case.case_id,
+                    status="completed",
+                    trace_path="",
+                )
+                for case in plan.cases
+            ],
+            assertion_results=[
+                AssertionResult(
+                    name="golden_set",
+                    passed=True,
+                    expected="passed",
+                    actual="passed",
+                )
+            ],
+        )
 
 
 def make_settings(tmp_path: Path, *, token: str = TOKEN) -> Settings:
@@ -432,7 +466,7 @@ def test_waiting_thread_rejects_normal_message_and_empty_feedback(
 @pytest.mark.parametrize(
     ("command", "expected_status"),
     [
-        ("批准", "approved"),
+        ("批准", "completed"),
         ("取消", "cancel"),
         ("驳回：缺少边界值", "reject"),
         ("补充：补充自转账场景", "supplement"),
@@ -443,10 +477,12 @@ def test_api_parses_review_decisions(
     command: str,
     expected_status: str,
 ) -> None:
+    backend = FakeExecutionBackend()
     app = create_app(
         settings=make_settings(tmp_path),
         model_provider=make_provider(),
         bug_client=StubBugClient(),
+        execution_backend=backend,
     )
 
     async def exercise() -> None:
@@ -468,6 +504,7 @@ def test_api_parses_review_decisions(
                 headers=AUTH_HEADERS,
             )
         assert response.status_code == 200
+        assert len(backend.calls) == (1 if command == "批准" else 0)
         assert response.json()["status"] == expected_status
         assert response.json()["waiting"] is False
 
@@ -645,6 +682,7 @@ def test_sqlite_checkpoint_recovers_after_app_restart(tmp_path: Path) -> None:
         settings=settings,
         model_provider=FailingModelProvider(),
         bug_client=StubBugClient(),
+        execution_backend=FakeExecutionBackend(),
     )
 
     async def resume_task() -> None:
@@ -664,7 +702,7 @@ def test_sqlite_checkpoint_recovers_after_app_restart(tmp_path: Path) -> None:
         assert before.json()["waiting"] is True
         assert approved.status_code == 200
         assert approved.json()["task_id"] == task_id
-        assert approved.json()["status"] == "approved"
+        assert approved.json()["status"] == "completed"
 
     asyncio.run(resume_task())
 

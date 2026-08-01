@@ -8,6 +8,7 @@ from pydantic import (
     ConfigDict,
     Field,
     StringConstraints,
+    field_validator,
     model_validator,
 )
 
@@ -38,6 +39,7 @@ NonBlankStr = Annotated[
     str,
     StringConstraints(strip_whitespace=True, min_length=1),
 ]
+PositiveStrictInt = Annotated[int, Field(strict=True, gt=0)]
 
 
 class StrictModel(BaseModel):
@@ -221,3 +223,24 @@ class ApprovalDecision(StrictModel):
         if self.action in {"reject", "supplement"} and not self.feedback.strip():
             raise ValueError(f"{self.action} decision requires feedback")
         return self
+
+
+class FailureAnalysis(StrictModel):
+    category: Literal[
+        "product",
+        "automation",
+        "environment",
+        "data",
+        "unknown",
+    ]
+    summary: NonBlankStr
+    evidence_refs: list[NonBlankStr] = Field(min_length=1)
+    related_bug_ids: list[PositiveStrictInt]
+    recommended_action: NonBlankStr
+
+    @field_validator("related_bug_ids")
+    @classmethod
+    def related_bug_ids_must_be_unique(cls, value: list[int]) -> list[int]:
+        if len(value) != len(set(value)):
+            raise ValueError("related_bug_ids must be unique")
+        return value

@@ -15,4 +15,8 @@ class AgentState(TypedDict, total=False):
     related_bugs: list[dict[str, Any]]
     test_plan: dict[str, Any]
     approval: dict[str, Any]
+    execution_results: list[dict[str, Any]]
+    assertion_results: list[dict[str, Any]]
+    failure_analysis: dict[str, Any]
+    passed: bool
     errors: list[str]

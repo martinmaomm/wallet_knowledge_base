@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 from uuid import uuid4
 
 from langchain_core.runnables import RunnableConfig
@@ -16,10 +16,16 @@ from agent_service.dsl import (
     plan_fingerprint,
     validate_test_plan,
 )
+from agent_service.execution.assertions import (
+    AssertionResult,
+    ExecutionBackendResult,
+)
+from agent_service.execution.security import assert_execution_allowed
 from agent_service.graph.state import AgentState
-from agent_service.model_provider import ModelProvider
+from agent_service.model_provider import ModelProvider, StructuredModelError
 from agent_service.schemas import (
     ApprovalDecision,
+    FailureAnalysis,
     RequirementSet,
     RelatedBug,
     RiskAnalysis,
@@ -28,11 +34,16 @@ from agent_service.schemas import (
 from agent_service.sources import load_sources, read_prompt
 
 
+class ExecutionBackend(Protocol):
+    async def execute(self, plan: TestPlan) -> ExecutionBackendResult: ...
+
+
 @dataclass(frozen=True)
 class GraphDependencies:
     settings: Settings
     model_provider: ModelProvider
     bug_client: BugClient
+    execution_backend: ExecutionBackend | None = None
 
 
 INVALID_APPROVAL_MESSAGE = "Approval response is invalid."
@@ -318,6 +329,141 @@ def make_nodes(deps: GraphDependencies) -> dict[str, Any]:
             "status": status,
         }
 
+    def execution_failure(
+        *,
+        name: str,
+        expected: str,
+        actual: str,
+    ) -> dict[str, Any]:
+        assertion = AssertionResult(
+            name=name,
+            passed=False,
+            expected=expected,
+            actual=actual,
+        )
+        return {
+            "execution_results": [],
+            "assertion_results": [assertion.model_dump()],
+            "status": "execution_failed",
+            "passed": False,
+        }
+
+    async def execute_tests(state: AgentState) -> dict[str, Any]:
+        try:
+            plan = validate_test_plan(
+                TestPlan.model_validate(state["test_plan"]),
+                require_golden_set=True,
+            )
+            plan = _validate_test_plan_source_refs(plan, state)
+            approval = ApprovalDecision.model_validate(state["approval"])
+            assert_execution_allowed(
+                deps.settings,
+                plan,
+                approval,
+            )
+        except (KeyError, ValidationError, ValueError, PermissionError):
+            return execution_failure(
+                name="execution_authorized",
+                expected="approved plan with matching hash",
+                actual="denied",
+            )
+
+        if deps.execution_backend is None:
+            return execution_failure(
+                name="execution_backend_available",
+                expected="configured",
+                actual="unavailable",
+            )
+
+        try:
+            raw_result = await deps.execution_backend.execute(plan)
+            result = ExecutionBackendResult.model_validate(raw_result)
+        except Exception:
+            return execution_failure(
+                name="execution_backend_succeeded",
+                expected="completed",
+                actual="failed",
+            )
+
+        expected_case_ids = [case.case_id for case in plan.cases]
+        actual_case_ids = [
+            item.case_id for item in result.execution_results
+        ]
+        if (
+            actual_case_ids != expected_case_ids
+            or any(
+                item.status != "completed"
+                for item in result.execution_results
+            )
+        ):
+            return execution_failure(
+                name="execution_results_complete",
+                expected="one completed result per planned case",
+                actual="incomplete",
+            )
+
+        assertion_results = [
+            item.model_dump() for item in result.assertion_results
+        ]
+        passed = all(item.passed for item in result.assertion_results)
+        return {
+            "execution_results": [
+                item.model_dump(mode="json")
+                for item in result.execution_results
+            ],
+            "assertion_results": assertion_results,
+            "status": "completed" if passed else "execution_failed",
+            "passed": passed,
+        }
+
+    async def classify_failure(state: AgentState) -> dict[str, Any]:
+        context = {
+            "execution_results": state.get("execution_results", []),
+            "assertion_results": state.get("assertion_results", []),
+            "related_bugs": state.get("related_bugs", []),
+        }
+        prompt = (
+            f"{read_prompt('classify_failure')}\n\n"
+            "<validated_failure_context>\n"
+            f"{_json_payload(context)}\n"
+            "</validated_failure_context>"
+        )
+        try:
+            result = await deps.model_provider.generate_structured(
+                task_type="classify_failure",
+                prompt=prompt,
+                schema=FailureAnalysis,
+            )
+        except StructuredModelError:
+            result = FailureAnalysis(
+                category="unknown",
+                summary="Failure classification is unavailable.",
+                evidence_refs=["deterministic_assertion_results"],
+                related_bug_ids=[],
+                recommended_action="Review deterministic execution evidence.",
+            )
+
+        known_bug_ids = {
+            item["bug_id"]
+            for item in state.get("related_bugs", [])
+            if isinstance(item, dict)
+            and type(item.get("bug_id")) is int
+            and item["bug_id"] > 0
+        }
+        if not set(result.related_bug_ids).issubset(known_bug_ids):
+            result = FailureAnalysis(
+                category="unknown",
+                summary="Failure classification references unknown Bugs.",
+                evidence_refs=["deterministic_assertion_results"],
+                related_bug_ids=[],
+                recommended_action="Review deterministic execution evidence.",
+            )
+        return {
+            "failure_analysis": result.model_dump(),
+            "status": "failure_classified",
+            "passed": False,
+        }
+
     return {
         "load_sources": load_sources_node,
         "extract_requirements": extract_requirements,
@@ -325,4 +471,6 @@ def make_nodes(deps: GraphDependencies) -> dict[str, Any]:
         "retrieve_bugs": retrieve_bugs,
         "generate_test_plan": generate_test_plan,
         "human_review": human_review,
+        "execute_tests": execute_tests,
+        "classify_failure": classify_failure,
     }

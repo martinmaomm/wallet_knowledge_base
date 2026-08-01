@@ -155,3 +155,94 @@ gateway。只有在 Open WebUI 和 Agent API 都直接运行于宿主机时，�
 最后，在 Open WebUI 的 Pipe 配置界面把与项目 `.env` 中相同的
 `AGENT_API_TOKEN` 填入 `AGENT_API_TOKEN` Valve。不要把真实 Token
 写进 Pipe 文件；Valve 的持久化安全依赖上述 Open WebUI 加密配置。
+
+## 9. Web2 内部转账 Agent 作品集
+
+### 要解决的问题
+
+项目没有持续维护 Swagger，无法直接从接口契约生成自动化用例；同时，单纯
+依赖知识库问答或模型自由调用工具，会出现漏检、字段查询不精确和执行过程
+不可复现的问题。本 MVP（最小可行产品）把 PRD、结构化 Bug 数据、本地模型、
+人工审批和浏览器自动化串成一条可审计流程，第一版只覆盖 Web2 内部转账。
+
+### 架构与选择
+
+```text
+Open WebUI
+    │  本地 Bearer Token
+    ▼
+FastAPI Agent API ── LangGraph 状态机 ── SQLite Checkpoint
+    │                       │
+    ├── Ollama/qwen3.5:9b   ├── PRD 本地文件
+    ├── Bug 查询服务        └── 人工审批中断与恢复
+    └── 受限 DSL Runner ── Playwright ── 报告与脱敏证据
+```
+
+LangGraph（有状态工作流编排框架）负责保存流程状态、在审批节点暂停并用同一
+`thread_id` 恢复。模型只处理需要语义理解的需求抽取、测试计划生成和失败归类；
+安全边界与可重复判断全部由确定性代码负责。
+
+| 交给本地模型 | 交给确定性代码 |
+|---|---|
+| 从来源材料抽取结构化需求 | URL 来源白名单、Token 校验和线程互斥 |
+| 生成受 Schema 约束的测试计划 | Golden Set 完整性、计划哈希和审批校验 |
+| 基于脱敏结果辅助归类失败 | DSL 动作白名单、Playwright 执行和断言 |
+| 生成面向人的解释 | 凭据脱敏、原子报告写入和文件权限 |
+
+所有模型调用默认走本机 `Ollama`，当前流程的云模型调用数固定为 `0`。模型
+Provider 使用抽象接口，后续可替换其他本地或云端模型做效果对比。
+
+### 本地运行
+
+先按第 7 节配置项目根目录 `.env`，再分别启动依赖：
+
+```bash
+ollama serve
+.venv/bin/python -m bug_service.sync \
+  --env-file /Users/maoyijiu/Documents/tg-work/BI/.env \
+  --product-id 9 --product-name 内部钱包
+.venv/bin/uvicorn bug_service.api:app --host 0.0.0.0 --port 8765
+./scripts/run_agent.sh
+docker start open-webui
+```
+
+命令行演示使用同一个 `thread_id` 完成暂停和恢复：
+
+```bash
+.venv/bin/python scripts/run_internal_transfer_demo.py \
+  --thread-id portfolio-demo
+.venv/bin/python scripts/run_internal_transfer_demo.py \
+  --thread-id portfolio-demo --approve
+```
+
+Open WebUI 的安装和 Valve 配置见第 8 节。聊天中先发送
+`测试 Web2 内部转账`，检查计划后再发送 `批准`。
+
+### 验证与指标
+
+```bash
+.venv/bin/python -m pytest -m "not e2e" -q
+RUN_WALLET_E2E=1 .venv/bin/python -m pytest \
+  tests/e2e/test_internal_transfer_agent.py -v
+```
+
+| 指标 | 当前证据 | 状态 |
+|---|---|---|
+| Golden Set 覆盖率 | 六个基准用例均进入计划时为 `100%`，有自动化测试保护 | 已验证代码契约 |
+| 云模型调用数 | API 结果固定报告 `cloud_model_calls=0` | 已验证代码契约 |
+| 模型结构化输出重试率 | 当前只配置最多重试次数，尚未记录运行级尝试次数 | 待增加观测指标 |
+| 真实测试环境闭环 | 需要测试 URL、账号、认证状态和站点选择器适配 | 尚未验收 |
+
+真实 E2E 必须显式设置 `RUN_WALLET_E2E=1`，默认测试不会修改测试环境数据。
+当前生产 `ExecutionBackend` 仍未完成组装，`login` 动作也会安全失败，因此真实
+环境审批后不会执行转账。完成站点 DOM（页面元素结构）适配前，不应把模拟
+后端生成的结果作为真实运行证据。
+
+### 作品集取证与路线图
+
+真实验收后应保存四类脱敏截图：审批暂停、批准后恢复、网络清单、最终报告。
+截图和报告不得包含账号、交易密码、Cookie 或 Token。
+
+后续按优先级扩展：完成 Web2 站点适配和生产执行后端；补充模型重试率与耗时
+指标；支持链上转账、后台和 App；进行本地/云模型横向比较；最后增加自动生成
+Bug 草稿功能。自动提交 Bug 不在当前范围内，仍需人工确认。

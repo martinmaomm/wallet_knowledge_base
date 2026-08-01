@@ -2699,7 +2699,13 @@ git commit -m "feat: generate traceable local test reports"
 - Consumes: all completed Agent components and configured test environment.
 - Produces: one real approved internal-transfer run, reproducible demo commands, portfolio evidence.
 
-- [ ] **Step 1: Add an opt-in real-environment E2E test**
+> 2026-08-01 progress: the opt-in E2E test and CLI wrapper are complete. Real
+> environment acceptance remains blocked until the wallet URL, test credentials,
+> saved authentication state, site selectors, and production
+> `ExecutionBackend` assembly are available. Mock execution is not accepted as
+> portfolio evidence.
+
+- [x] **Step 1: Add an opt-in real-environment E2E test**
 
 Create `tests/e2e/test_internal_transfer_agent.py`:
 
@@ -2754,7 +2760,7 @@ def test_internal_transfer_full_agent_flow(real_agent_client) -> None:
     assert completed["summary"]["cloud_model_calls"] == 0
 ```
 
-- [ ] **Step 2: Create a command-line demo wrapper**
+- [x] **Step 2: Create a command-line demo wrapper**
 
 Create `scripts/run_internal_transfer_demo.py`:
 

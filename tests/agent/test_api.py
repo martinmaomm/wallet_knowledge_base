@@ -507,6 +507,15 @@ def test_api_parses_review_decisions(
         assert len(backend.calls) == (1 if command == "批准" else 0)
         assert response.json()["status"] == expected_status
         assert response.json()["waiting"] is False
+        if command == "批准":
+            assert response.json()["metrics"] == {
+                "golden_set_coverage_percent": 100.0,
+                "case_count": 6,
+            }
+            assert response.json()["summary"] == {
+                "passed": True,
+                "cloud_model_calls": 0,
+            }
 
     asyncio.run(exercise())
 

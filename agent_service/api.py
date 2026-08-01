@@ -35,6 +35,7 @@ from agent_service.graph.build import (
 )
 from agent_service.graph.nodes import ExecutionBackend
 from agent_service.model_provider import ModelProvider, OllamaProvider
+from agent_service.reporting import evaluate_golden_set
 from agent_service.schemas import ApprovalDecision
 
 
@@ -240,7 +241,7 @@ def parse_decision(message: str) -> ApprovalDecision | None:
 def _safe_task_projection(thread_id: str, snapshot: Any) -> dict[str, Any]:
     values = snapshot.values if isinstance(snapshot.values, dict) else {}
     task_id = values.get("task_id")
-    return {
+    projection: dict[str, Any] = {
         "thread_id": thread_id,
         "task_id": (
             task_id
@@ -252,6 +253,25 @@ def _safe_task_projection(thread_id: str, snapshot: Any) -> dict[str, Any]:
         "waiting": _is_waiting(snapshot),
         "interrupts": safe_interrupts(snapshot),
     }
+    if projection["status"] in {"completed", "failure_classified"}:
+        plan = values.get("test_plan")
+        cases = plan.get("cases") if isinstance(plan, dict) else []
+        case_ids = [
+            item["case_id"]
+            for item in cases
+            if isinstance(item, dict)
+            and isinstance(item.get("case_id"), str)
+        ]
+        coverage = evaluate_golden_set(case_ids)
+        projection["metrics"] = {
+            "golden_set_coverage_percent": coverage.coverage_percent,
+            "case_count": len(case_ids),
+        }
+        projection["summary"] = {
+            "passed": values.get("passed") is True,
+            "cloud_model_calls": 0,
+        }
+    return projection
 
 
 def render_chat_message(snapshot: Any) -> str:

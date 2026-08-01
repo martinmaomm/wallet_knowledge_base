@@ -157,11 +157,12 @@ def build_graph(
         "execute_tests",
         lambda state: "finish" if state.get("passed") is True else "classify",
         {
-            "finish": END,
+            "finish": "generate_report",
             "classify": "classify_failure",
         },
     )
-    builder.add_edge("classify_failure", END)
+    builder.add_edge("classify_failure", "generate_report")
+    builder.add_edge("generate_report", END)
     return ValidatedCompiledGraph(
         builder.compile(checkpointer=checkpointer)
     )

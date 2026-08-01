@@ -23,6 +23,7 @@ from agent_service.execution.assertions import (
 from agent_service.execution.security import assert_execution_allowed
 from agent_service.graph.state import AgentState
 from agent_service.model_provider import ModelProvider, StructuredModelError
+from agent_service.reporting import write_reports
 from agent_service.schemas import (
     ApprovalDecision,
     FailureAnalysis,
@@ -464,6 +465,14 @@ def make_nodes(deps: GraphDependencies) -> dict[str, Any]:
             "passed": False,
         }
 
+    def generate_report(state: AgentState) -> dict[str, Any]:
+        paths = write_reports(
+            task_id=state["task_id"],
+            artifacts_root=deps.settings.artifacts_dir,
+            state=dict(state),
+        )
+        return {"report_paths": paths}
+
     return {
         "load_sources": load_sources_node,
         "extract_requirements": extract_requirements,
@@ -473,4 +482,5 @@ def make_nodes(deps: GraphDependencies) -> dict[str, Any]:
         "human_review": human_review,
         "execute_tests": execute_tests,
         "classify_failure": classify_failure,
+        "generate_report": generate_report,
     }

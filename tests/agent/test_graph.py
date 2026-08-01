@@ -166,9 +166,10 @@ def test_graph_pauses_for_review_and_approve_uses_server_plan_hash(
         ("generate_test_plan", "human_review"),
         ("human_review", "__end__"),
         ("human_review", "execute_tests"),
-        ("execute_tests", "__end__"),
+        ("execute_tests", "generate_report"),
         ("execute_tests", "classify_failure"),
-        ("classify_failure", "__end__"),
+        ("classify_failure", "generate_report"),
+        ("generate_report", "__end__"),
     }
     config, interrupted = invoke_until_review(graph, "chat-1")
 
@@ -769,6 +770,10 @@ def test_passed_assertions_complete_without_failure_classification(
     ]
     assert len(backend.calls) == 1
     assert all(item["passed"] for item in final["assertion_results"])
+    assert set(final["report_paths"]) == {"json", "markdown", "html"}
+    assert all(
+        Path(path).is_file() for path in final["report_paths"].values()
+    )
 
 
 def test_failed_assertion_is_classified_but_never_changed_to_passed(
@@ -802,6 +807,9 @@ def test_failed_assertion_is_classified_but_never_changed_to_passed(
     assert final["passed"] is False
     assert final["failure_analysis"]["category"] == "product"
     assert "passed" not in final["failure_analysis"]
+    assert all(
+        Path(path).is_file() for path in final["report_paths"].values()
+    )
 
 
 def test_reject_supplement_and_cancel_never_call_execution_backend(

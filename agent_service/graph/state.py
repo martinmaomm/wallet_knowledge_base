@@ -18,5 +18,6 @@ class AgentState(TypedDict, total=False):
     execution_results: list[dict[str, Any]]
     assertion_results: list[dict[str, Any]]
     failure_analysis: dict[str, Any]
+    report_paths: dict[str, str]
     passed: bool
     errors: list[str]

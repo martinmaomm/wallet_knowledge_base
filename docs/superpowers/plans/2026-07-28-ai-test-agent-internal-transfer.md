@@ -2497,7 +2497,7 @@ git commit -m "feat: verify transfer outcomes and classify failures"
 - Consumes: complete graph state.
 - Produces: atomic JSON artifacts, `report.md`, `report.html`, coverage metrics.
 
-- [ ] **Step 1: Write failing artifact and coverage tests**
+- [x] **Step 1: Write failing artifact and coverage tests**
 
 Create `tests/agent/test_reporting.py`:
 
@@ -2544,7 +2544,7 @@ Run:
 
 Expected: FAIL because reporting modules do not exist.
 
-- [ ] **Step 2: Implement atomic artifact writes**
+- [x] **Step 2: Implement atomic artifact writes**
 
 Create `agent_service/artifacts.py`:
 
@@ -2567,7 +2567,7 @@ def atomic_write_json(path: Path, value: Any) -> None:
     os.replace(temporary, path)
 ```
 
-- [ ] **Step 3: Implement evaluation and human-readable reports**
+- [x] **Step 3: Implement evaluation and human-readable reports**
 
 Create `agent_service/reporting.py`:
 
@@ -2629,7 +2629,7 @@ def write_reports(
     }
 ```
 
-- [ ] **Step 4: Add graph report integration and redaction checks**
+- [x] **Step 4: Add graph report integration and redaction checks**
 
 Update `generate_report` to write:
 

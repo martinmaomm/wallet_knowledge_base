@@ -74,6 +74,43 @@ def test_source_loader_allows_an_empty_path_list() -> None:
 
     assert loaded.documents == ()
     assert loaded.combined_text == ""
+    assert loaded.internal_transfer_text == ""
+
+
+def test_internal_transfer_text_keeps_only_matching_markdown_sections(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "wallet.md"
+    path.write_text(
+        "# Wallet\n\n"
+        "## 登录模块\n登录内容不应进入模型。\n\n"
+        "## 转出模块\n"
+        "### 转出-内部转账模块\n"
+        "内部转账规则。\n"
+        "#### TC-OTI-001\n内部转账用例。\n"
+        "### 转出-链上转账模块\n链上内容不应进入模型。\n",
+        encoding="utf-8",
+    )
+
+    loaded = load_sources([path])
+    scoped = loaded.internal_transfer_text
+
+    assert f"## SOURCE {expected_source_id(path)}" in scoped
+    assert "内部转账规则" in scoped
+    assert "TC-OTI-001" in scoped
+    assert "登录内容不应进入模型" not in scoped
+    assert "链上内容不应进入模型" not in scoped
+
+
+def test_internal_transfer_text_falls_back_when_no_heading_matches(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "source.txt"
+    path.write_text("plain scoped source", encoding="utf-8")
+
+    loaded = load_sources([path])
+
+    assert loaded.internal_transfer_text.endswith("plain scoped source")
 
 
 def test_loaded_documents_are_immutable_as_a_collection() -> None:

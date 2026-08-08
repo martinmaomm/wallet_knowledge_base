@@ -26,6 +26,79 @@ GOLDEN_TITLES = {
     "TC-OTI-006": "重复点击提交只产生一笔交易",
 }
 
+GOLDEN_CASE_DEFINITIONS = {
+    "TC-OTI-001": {
+        "steps": [{"action": "open_internal_transfer"}],
+        "assertions": [{"type": "page_loaded"}],
+    },
+    "TC-OTI-002": {
+        "steps": [
+            {"action": "fill_recipient", "source": "recipient_account"},
+            {"action": "fill_amount", "value": "10"},
+            {"action": "complete_security_verification"},
+            {"action": "submit"},
+        ],
+        "assertions": [
+            {"type": "transfer_request_succeeded"},
+            {"type": "payer_balance_decreased", "amount": "10"},
+            {"type": "recipient_balance_increased", "amount": "10"},
+            {"type": "transaction_record_created"},
+        ],
+    },
+    "TC-OTI-003": {
+        "steps": [
+            {"action": "fill_recipient", "value": ""},
+            {"action": "submit"},
+        ],
+        "assertions": [
+            {
+                "type": "validation_message_equals",
+                "expected": "收款人不能为空",
+            },
+            {"type": "request_not_sent"},
+        ],
+    },
+    "TC-OTI-004": {
+        "steps": [
+            {"action": "fill_amount", "value": "0"},
+            {"action": "submit"},
+        ],
+        "assertions": [
+            {
+                "type": "validation_message_equals",
+                "expected": "金额不能为空或必须大于 0",
+            },
+            {"type": "request_not_sent"},
+        ],
+    },
+    "TC-OTI-005": {
+        "steps": [
+            {
+                "action": "fill_amount",
+                "source": "amount_above_available_balance",
+            },
+            {"action": "submit"},
+        ],
+        "assertions": [
+            {
+                "type": "validation_message_equals",
+                "expected": "余额不足",
+            },
+            {"type": "request_not_sent"},
+        ],
+    },
+    "TC-OTI-006": {
+        "steps": [
+            {"action": "fill_recipient", "source": "recipient_account"},
+            {"action": "fill_amount", "value": "10"},
+            {"action": "complete_security_verification"},
+            {"action": "submit"},
+            {"action": "submit"},
+        ],
+        "assertions": [{"type": "single_transaction_created"}],
+    },
+}
+
 
 def _require_actions(case: TestCase, **required: int) -> None:
     actual = Counter(step.action for step in case.steps)
@@ -342,6 +415,29 @@ def validate_test_plan(
         for case_id in sorted(REQUIRED_BASELINE_IDS):
             _validate_golden_case(case_id, strict_plan)
     return strict_plan
+
+
+def build_golden_plan() -> TestPlan:
+    cases = [
+        TestCase.model_validate(
+            {
+                "case_id": case_id,
+                "title": GOLDEN_TITLES[case_id],
+                "priority": "P0",
+                "source_refs": [f"人工基准:{case_id}"],
+                "inferred": False,
+                "rationale": "Version-controlled manual baseline",
+                "preconditions": [],
+                **GOLDEN_CASE_DEFINITIONS[case_id],
+            }
+        )
+        for case_id in sorted(REQUIRED_BASELINE_IDS)
+    ]
+    plan = TestPlan(
+        summary="Web2 internal transfer deterministic Golden Set",
+        cases=cases,
+    )
+    return validate_test_plan(plan, require_golden_set=True)
 
 
 def plan_fingerprint(plan: TestPlan) -> str:

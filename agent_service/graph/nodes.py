@@ -1,18 +1,20 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar
 from uuid import uuid4
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import interrupt
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from agent_service.bug_client import BugClient
 from agent_service.config import Settings
 from agent_service.dsl import (
     REQUIRED_BASELINE_IDS,
+    build_golden_plan,
     plan_fingerprint,
     validate_test_plan,
 )
@@ -58,6 +60,7 @@ RELATED_BUG_FIELDS = frozenset(
         "resolution",
     }
 )
+ValidatedModel = TypeVar("ValidatedModel", bound=BaseModel)
 
 
 def _json_payload(value: Any) -> str:
@@ -190,10 +193,54 @@ def initialize_task(
 
 
 def make_nodes(deps: GraphDependencies) -> dict[str, Any]:
+    async def generate_semantically_valid(
+        *,
+        task_type: str,
+        prompt: str,
+        schema: type[ValidatedModel],
+        validator: Callable[[ValidatedModel], ValidatedModel],
+        allowed_source_refs: frozenset[str],
+    ) -> ValidatedModel:
+        allowed_refs = _json_payload(sorted(allowed_source_refs))
+        base_prompt = (
+            f"{prompt}\n\n"
+            "<allowed_source_refs>\n"
+            f"{allowed_refs}\n"
+            "</allowed_source_refs>\n"
+            "Use source_refs only from this exact allowlist. Preserve each "
+            "source ID exactly; do not cite file names or invent IDs."
+        )
+        attempts = deps.settings.model_retry_limit + 1
+        current_prompt = base_prompt
+        for attempt in range(attempts):
+            result = await deps.model_provider.generate_structured(
+                task_type=task_type,
+                prompt=current_prompt,
+                schema=schema,
+            )
+            try:
+                return validator(result)
+            except ValueError:
+                if attempt + 1 >= attempts:
+                    break
+                current_prompt = (
+                    f"{base_prompt}\n\n"
+                    "<deterministic_validation_feedback>\n"
+                    "The previous response failed deterministic validation. "
+                    "Regenerate the complete result, satisfy every required "
+                    "constraint, and use only the exact allowed source_refs.\n"
+                    "</deterministic_validation_feedback>"
+                )
+
+        raise StructuredModelError(
+            f"{task_type} failed deterministic validation after "
+            f"{attempts} attempts"
+        ) from None
+
     def load_sources_node(_: AgentState) -> dict[str, Any]:
         loaded = load_sources(deps.settings.source_paths)
         return {
-            "source_text": loaded.combined_text,
+            "source_text": loaded.internal_transfer_text,
             "source_versions": [
                 item.model_dump(exclude={"content"})
                 for item in loaded.documents
@@ -210,12 +257,16 @@ def make_nodes(deps: GraphDependencies) -> dict[str, Any]:
             f"{state['source_text']}\n"
             "</supplied_sources>"
         )
-        result = await deps.model_provider.generate_structured(
+        result = await generate_semantically_valid(
             task_type="extract_requirements",
             prompt=prompt,
             schema=RequirementSet,
+            validator=lambda value: _validate_requirement_source_refs(
+                value,
+                state,
+            ),
+            allowed_source_refs=_source_ids(state),
         )
-        result = _validate_requirement_source_refs(result, state)
         return {
             "requirements": result.model_dump(),
             "status": "requirements_extracted",
@@ -228,12 +279,16 @@ def make_nodes(deps: GraphDependencies) -> dict[str, Any]:
             f"{_json_payload(state['requirements'])}\n"
             "</validated_requirements>"
         )
-        result = await deps.model_provider.generate_structured(
+        result = await generate_semantically_valid(
             task_type="analyze_risks",
             prompt=prompt,
             schema=RiskAnalysis,
+            validator=lambda value: _validate_risk_source_refs(
+                value,
+                state,
+            ),
+            allowed_source_refs=_source_ids(state),
         )
-        result = _validate_risk_source_refs(result, state)
         return {
             "risks": result.model_dump(),
             "status": "risks_analyzed",
@@ -261,15 +316,30 @@ def make_nodes(deps: GraphDependencies) -> dict[str, Any]:
             f"{_json_payload(context)}\n"
             "</validated_context>"
         )
-        result = await deps.model_provider.generate_structured(
-            task_type="generate_test_plan",
-            prompt=prompt,
-            schema=TestPlan,
+        def validate_generated_plan(value: TestPlan) -> TestPlan:
+            plan = validate_test_plan(value, require_golden_set=True)
+            return _validate_test_plan_source_refs(plan, state)
+
+        allowed_refs = _source_ids(state) | _related_bug_refs(state)
+        allowed_refs |= frozenset(
+            f"人工基准:{case_id}"
+            for case_id in REQUIRED_BASELINE_IDS
         )
-        plan = validate_test_plan(result, require_golden_set=True)
-        plan = _validate_test_plan_source_refs(plan, state)
+        try:
+            plan = await generate_semantically_valid(
+                task_type="generate_test_plan",
+                prompt=prompt,
+                schema=TestPlan,
+                validator=validate_generated_plan,
+                allowed_source_refs=allowed_refs,
+            )
+            generation_mode = "model"
+        except StructuredModelError:
+            plan = build_golden_plan()
+            generation_mode = "deterministic_fallback"
         return {
             "test_plan": plan.model_dump(),
+            "plan_generation_mode": generation_mode,
             "status": "plan_validated",
         }
 

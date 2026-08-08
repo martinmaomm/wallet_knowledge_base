@@ -39,6 +39,18 @@ NonBlankStr = Annotated[
     str,
     StringConstraints(strip_whitespace=True, min_length=1),
 ]
+ConciseStr = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=300),
+]
+ShortStr = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=120),
+]
+OptionalConciseStr = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, max_length=300),
+]
 PositiveStrictInt = Annotated[int, Field(strict=True, gt=0)]
 
 
@@ -54,8 +66,8 @@ class SourceRef(StrictModel):
 
 class Requirement(StrictModel):
     requirement_id: NonBlankStr
-    statement: NonBlankStr
-    source_refs: list[NonBlankStr]
+    statement: ConciseStr
+    source_refs: list[NonBlankStr] = Field(max_length=4)
     confirmed: bool
 
     @model_validator(mode="after")
@@ -67,15 +79,18 @@ class Requirement(StrictModel):
 
 class RequirementSet(StrictModel):
     scope: Literal["web2_internal_transfer"]
-    requirements: list[Requirement]
-    missing_rules: list[str] = Field(default_factory=list)
+    requirements: list[Requirement] = Field(max_length=12)
+    missing_rules: list[ConciseStr] = Field(
+        default_factory=list,
+        max_length=8,
+    )
 
 
 class RiskItem(StrictModel):
     risk_id: NonBlankStr
-    description: NonBlankStr
+    description: ConciseStr
     severity: Literal["high", "medium", "low"]
-    source_refs: list[NonBlankStr]
+    source_refs: list[NonBlankStr] = Field(max_length=4)
     inferred: bool
 
     @model_validator(mode="after")
@@ -86,9 +101,9 @@ class RiskItem(StrictModel):
 
 
 class RiskAnalysis(StrictModel):
-    ambiguities: list[str]
-    risks: list[RiskItem]
-    bug_queries: list[str]
+    ambiguities: list[ConciseStr] = Field(max_length=8)
+    risks: list[RiskItem] = Field(max_length=12)
+    bug_queries: list[ShortStr] = Field(max_length=8)
 
 
 class RelatedBug(StrictModel):
@@ -187,14 +202,14 @@ class TestAssertion(StrictModel):
 
 class TestCase(StrictModel):
     case_id: NonBlankStr
-    title: NonBlankStr
+    title: ShortStr
     priority: Literal["P0", "P1", "P2"]
-    source_refs: list[NonBlankStr] = Field(min_length=1)
+    source_refs: list[NonBlankStr] = Field(min_length=1, max_length=8)
     inferred: bool
-    rationale: str
-    preconditions: list[str]
-    steps: list[TestStep] = Field(min_length=1)
-    assertions: list[TestAssertion] = Field(min_length=1)
+    rationale: OptionalConciseStr
+    preconditions: list[ConciseStr] = Field(max_length=8)
+    steps: list[TestStep] = Field(min_length=1, max_length=16)
+    assertions: list[TestAssertion] = Field(min_length=1, max_length=12)
 
     @model_validator(mode="after")
     def inferred_cases_need_rationale(self) -> "TestCase":
@@ -204,8 +219,8 @@ class TestCase(StrictModel):
 
 
 class TestPlan(StrictModel):
-    summary: NonBlankStr
-    cases: list[TestCase] = Field(min_length=1)
+    summary: ConciseStr
+    cases: list[TestCase] = Field(min_length=1, max_length=12)
 
 
 class ApprovalDecision(StrictModel):

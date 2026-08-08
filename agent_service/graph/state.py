@@ -14,6 +14,7 @@ class AgentState(TypedDict, total=False):
     risks: dict[str, Any]
     related_bugs: list[dict[str, Any]]
     test_plan: dict[str, Any]
+    plan_generation_mode: str
     approval: dict[str, Any]
     execution_results: list[dict[str, Any]]
     assertion_results: list[dict[str, Any]]

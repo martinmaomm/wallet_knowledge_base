@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import os
+import re
 import stat
 from pathlib import Path
 
@@ -11,6 +12,8 @@ from pydantic import BaseModel, ConfigDict
 
 ALLOWED_SOURCE_SUFFIXES = frozenset({".md", ".txt"})
 MAX_SOURCE_BYTES = 2 * 1024 * 1024
+INTERNAL_TRANSFER_HEADING = "内部转账"
+MARKDOWN_HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 PROMPTS_DIR = Path(__file__).resolve().parents[1] / "prompts"
 ALLOWED_PROMPTS = frozenset(
     {
@@ -46,6 +49,46 @@ class LoadedSources(BaseModel):
             f"## SOURCE {document.source_id}\n{document.content}"
             for document in self.documents
         )
+
+    @property
+    def internal_transfer_text(self) -> str:
+        return "\n\n".join(
+            f"## SOURCE {document.source_id}\n"
+            f"{_internal_transfer_excerpt(document.content)}"
+            for document in self.documents
+        )
+
+
+def _internal_transfer_excerpt(content: str) -> str:
+    lines = content.splitlines()
+    headings: list[tuple[int, int, str]] = []
+    for index, line in enumerate(lines):
+        match = MARKDOWN_HEADING_PATTERN.match(line)
+        if match is not None:
+            headings.append((index, len(match.group(1)), match.group(2)))
+
+    ranges: list[tuple[int, int]] = []
+    for position, (start, level, title) in enumerate(headings):
+        if INTERNAL_TRANSFER_HEADING not in title:
+            continue
+        end = len(lines)
+        for next_start, next_level, _ in headings[position + 1 :]:
+            if next_level <= level:
+                end = next_start
+                break
+        ranges.append((start, end))
+
+    if not ranges:
+        return content
+
+    selected: list[str] = []
+    covered_until = -1
+    for start, end in ranges:
+        if start < covered_until:
+            continue
+        selected.extend(lines[start:end])
+        covered_until = end
+    return "\n".join(selected).strip()
 
 
 def _resolve_source_path(input_path: Path) -> Path:

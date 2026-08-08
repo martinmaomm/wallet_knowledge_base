@@ -9,7 +9,7 @@ import httpx
 import pytest
 from langgraph.types import Command
 
-from agent_service.api import create_app
+from agent_service.api import SAFE_MODEL_ERROR_MESSAGE, create_app
 from agent_service.config import Settings
 from agent_service.execution.assertions import (
     AssertionResult,
@@ -137,6 +137,39 @@ def test_health_is_public_but_agent_routes_require_token(tmp_path: Path) -> None
         assert wrong.status_code == 401
         assert "wrong-secret-value" not in wrong.text
         assert TOKEN not in wrong.text
+
+    asyncio.run(exercise())
+
+
+def test_model_semantic_validation_failure_returns_safe_503(
+    tmp_path: Path,
+) -> None:
+    provider = make_provider()
+    secret_invalid_ref = "secret-model-source-ref"
+    provider.outputs["extract_requirements"]["requirements"][0][
+        "source_refs"
+    ] = [secret_invalid_ref]
+    app = create_app(
+        settings=make_settings(tmp_path),
+        model_provider=provider,
+        bug_client=StubBugClient(),
+    )
+
+    async def exercise() -> None:
+        async with app_client(app) as client:
+            response = await client.post(
+                "/agent/messages",
+                json={
+                    "thread_id": "invalid-model-source",
+                    "message": "测试内部转账",
+                },
+                headers=AUTH_HEADERS,
+            )
+
+        assert response.status_code == 503
+        assert response.json() == {"detail": SAFE_MODEL_ERROR_MESSAGE}
+        assert secret_invalid_ref not in response.text
+        assert provider.calls == ["extract_requirements"] * 3
 
     asyncio.run(exercise())
 

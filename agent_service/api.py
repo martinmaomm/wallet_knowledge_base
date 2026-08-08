@@ -34,13 +34,18 @@ from agent_service.graph.build import (
     validate_thread_id,
 )
 from agent_service.graph.nodes import ExecutionBackend
-from agent_service.model_provider import ModelProvider, OllamaProvider
+from agent_service.model_provider import (
+    ModelProvider,
+    OllamaProvider,
+    StructuredModelError,
+)
 from agent_service.reporting import evaluate_golden_set
 from agent_service.schemas import ApprovalDecision
 
 
 MAX_MESSAGE_LENGTH = 4000
 SAFE_INVALID_APPROVAL_MESSAGE = "审批输入或方案无效，请重新操作。"
+SAFE_MODEL_ERROR_MESSAGE = "本地模型暂时无法生成有效结果，请新建对话后重试。"
 SAFE_STATE_STATUSES = frozenset(
     {
         "initialized",
@@ -394,31 +399,37 @@ def create_app(
             waiting = _is_waiting(snapshot)
             decision = parse_decision(message.message)
 
-            if decision is not None:
-                if not waiting:
-                    raise HTTPException(
-                        status_code=409,
-                        detail="thread is not waiting for approval",
+            try:
+                if decision is not None:
+                    if not waiting:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="thread is not waiting for approval",
+                        )
+                    await graph.ainvoke(
+                        Command(resume=decision.model_dump()),
+                        config=config,
                     )
-                await graph.ainvoke(
-                    Command(resume=decision.model_dump()),
-                    config=config,
-                )
-            else:
-                if snapshot.values:
-                    detail = (
-                        "thread is waiting for approval"
-                        if waiting
-                        else "thread already has a task"
+                else:
+                    if snapshot.values:
+                        detail = (
+                            "thread is waiting for approval"
+                            if waiting
+                            else "thread already has a task"
+                        )
+                        raise HTTPException(status_code=409, detail=detail)
+                    await graph.ainvoke(
+                        {
+                            "thread_id": message.thread_id,
+                            "user_message": message.message,
+                        },
+                        config=config,
                     )
-                    raise HTTPException(status_code=409, detail=detail)
-                await graph.ainvoke(
-                    {
-                        "thread_id": message.thread_id,
-                        "user_message": message.message,
-                    },
-                    config=config,
-                )
+            except StructuredModelError:
+                raise HTTPException(
+                    status_code=503,
+                    detail=SAFE_MODEL_ERROR_MESSAGE,
+                ) from None
 
             current = await graph.aget_state(config)
             response = _safe_task_projection(message.thread_id, current)

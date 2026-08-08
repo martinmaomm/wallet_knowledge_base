@@ -16,6 +16,8 @@ from pydantic import BaseModel, ValidationError
 T = TypeVar("T", bound=BaseModel)
 LOCAL_OLLAMA_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 OLLAMA_SCHEMES = frozenset({"http", "https"})
+MAX_GENERATION_TOKENS = 2048
+SINGLE_ATTEMPT_TASKS = frozenset({"generate_test_plan"})
 
 
 class StructuredModelError(RuntimeError):
@@ -191,7 +193,9 @@ class OllamaProvider:
             base_url=base_url,
             model=validated_model,
             temperature=temperature,
+            reasoning=False,
             num_ctx=16384,
+            num_predict=MAX_GENERATION_TOKENS,
         )
         self.retry_limit = retry_limit
         self.timeout_seconds = timeout_seconds
@@ -206,7 +210,12 @@ class OllamaProvider:
     ) -> T:
         current_prompt = prompt
         failed_with_non_retryable_error = False
-        for _ in range(self.retry_limit + 1):
+        attempts = (
+            1
+            if task_type in SINGLE_ATTEMPT_TASKS
+            else self.retry_limit + 1
+        )
+        for _ in range(attempts):
             self.calls.append(task_type)
             try:
                 runnable = self.model.with_structured_output(schema)
@@ -234,5 +243,5 @@ class OllamaProvider:
 
         raise StructuredModelError(
             f"{task_type} failed structured generation after "
-            f"{self.retry_limit + 1} attempts"
+            f"{attempts} attempts"
         ) from None

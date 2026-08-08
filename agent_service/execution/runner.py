@@ -32,6 +32,7 @@ MAX_CASE_ID_LENGTH = 80
 DEFAULT_MAX_NETWORK_ENTRIES = 100
 NETWORK_IDLE_TIMEOUT_SECONDS = 3.0
 NETWORK_DRAIN_TIMEOUT_SECONDS = 3.0
+NETWORK_START_GRACE_SECONDS = 0.1
 _CASE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _ARTIFACT_PART_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -420,7 +421,7 @@ class _NetworkCollector:
             return
 
     async def wait_for_idle(self, timeout: float) -> None:
-        await asyncio.sleep(0)
+        await asyncio.sleep(NETWORK_START_GRACE_SECONDS)
         if not self._inflight:
             return
         await asyncio.wait_for(self._idle.wait(), timeout=timeout)

@@ -63,6 +63,26 @@ def test_fake_provider_returns_strictly_validated_schema() -> None:
     assert provider.calls == ["extract_requirements"]
 
 
+def test_generation_schema_exposes_finite_requirement_limits() -> None:
+    schema = RequirementSet.model_json_schema()
+
+    assert schema["properties"]["requirements"]["maxItems"] == 12
+    assert schema["properties"]["missing_rules"]["maxItems"] == 8
+    assert schema["$defs"]["Requirement"]["properties"]["statement"][
+        "maxLength"
+    ] == 300
+
+
+def test_generation_schemas_expose_finite_risk_and_plan_limits() -> None:
+    risk_schema = RiskAnalysis.model_json_schema()
+    plan_schema = GeneratedPlanSchema.model_json_schema()
+
+    assert risk_schema["properties"]["ambiguities"]["maxItems"] == 8
+    assert risk_schema["properties"]["risks"]["maxItems"] == 12
+    assert risk_schema["properties"]["bug_queries"]["maxItems"] == 8
+    assert plan_schema["properties"]["cases"]["maxItems"] == 12
+
+
 def test_fake_provider_retries_twice_after_initial_attempt() -> None:
     provider = FakeModelProvider(
         {
@@ -204,7 +224,9 @@ def test_ollama_provider_accepts_exact_local_hosts_without_network(
             "base_url": base_url,
             "model": "qwen3.5:9b",
             "temperature": 0.0,
+            "reasoning": False,
             "num_ctx": 16384,
+            "num_predict": 2048,
         }
     ]
 

@@ -46,5 +46,6 @@ title, P0 priority, and `人工基准:<case_id>` source:
   `submit` actions, and assert `single_transaction_created`.
 
 Additional evidence-based cases are allowed, but inferred cases must set
-`inferred=true` and include a rationale. Return only data matching the required
-structured schema.
+`inferred=true` and include a rationale. Return no more than 12 cases total,
+merge duplicate coverage, and keep titles and descriptions concise. Return
+only data matching the required structured schema.

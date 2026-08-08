@@ -5,7 +5,7 @@ from pydantic import ValidationError
 
 from agent_service.config import Settings
 from agent_service import dsl
-from agent_service.dsl import validate_test_plan
+from agent_service.dsl import build_golden_plan, validate_test_plan
 from agent_service.execution.security import assert_execution_allowed
 from agent_service.schemas import (
     ApprovalDecision,
@@ -165,6 +165,15 @@ def make_golden_plan() -> DslTestPlan:
             )
         )
     return DslTestPlan(summary="Web2 internal transfer Golden Set", cases=cases)
+
+
+def test_production_golden_plan_is_complete_and_strictly_valid() -> None:
+    plan = build_golden_plan()
+
+    assert validate_test_plan(plan, require_golden_set=True) == plan
+    assert [case.case_id for case in plan.cases] == sorted(
+        dsl.REQUIRED_BASELINE_IDS
+    )
 
 
 def approve_plan(plan: DslTestPlan) -> ApprovalDecision:

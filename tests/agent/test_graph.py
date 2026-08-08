@@ -13,7 +13,7 @@ from langgraph.types import Command
 
 from agent_service.bug_client import BugClient
 from agent_service.config import Settings
-from agent_service.dsl import plan_fingerprint
+from agent_service.dsl import plan_fingerprint, validate_test_plan
 from agent_service.execution.assertions import (
     AssertionResult,
     ExecutionBackendResult,
@@ -118,10 +118,41 @@ def make_provider() -> FakeModelProvider:
     return provider
 
 
+class RepairingSourceRefProvider:
+    def __init__(self, delegate: FakeModelProvider) -> None:
+        self.delegate = delegate
+        self.calls: list[str] = []
+        self.prompts: list[str] = []
+        self.failed_once = False
+
+    async def generate_structured(
+        self,
+        *,
+        task_type: str,
+        prompt: str,
+        schema: type,
+    ):
+        self.calls.append(task_type)
+        self.prompts.append(prompt)
+        result = await self.delegate.generate_structured(
+            task_type=task_type,
+            prompt=prompt,
+            schema=schema,
+        )
+        if task_type == "extract_requirements" and not self.failed_once:
+            self.failed_once = True
+            payload = result.model_dump(mode="python")
+            payload["requirements"][0]["source_refs"] = [
+                "invalid-model-source-ref"
+            ]
+            return schema.model_validate(payload)
+        return result
+
+
 def make_graph(
     tmp_path: Path,
     *,
-    provider: FakeModelProvider | None = None,
+    provider: Any | None = None,
     bug_client: Any | None = None,
     execution_backend: Any = ...,
 ):
@@ -186,6 +217,7 @@ def test_graph_pauses_for_review_and_approve_uses_server_plan_hash(
     paused = graph.get_state(config)
     assert paused.next == ("human_review",)
     assert paused.values["status"] == "plan_validated"
+    assert paused.values["plan_generation_mode"] == "model"
     plan = GeneratedTestPlan.model_validate(paused.values["test_plan"])
 
     final = asyncio.run(
@@ -297,7 +329,7 @@ def test_bug_queries_are_wired_to_client_and_results_enter_checkpoint(
     assert checkpoint.values["related_bugs"] == [bug.model_dump()]
 
 
-def test_graph_rejects_model_plan_missing_a_golden_case(
+def test_graph_falls_back_when_model_plan_misses_a_golden_case(
     tmp_path: Path,
 ) -> None:
     provider = make_provider()
@@ -305,20 +337,18 @@ def test_graph_rejects_model_plan_missing_a_golden_case(
         "generate_test_plan"
     ]["cases"][:-1]
     graph, _, _ = make_graph(tmp_path, provider=provider)
-    config = {"configurable": {"thread_id": "invalid-plan"}}
-
-    with pytest.raises(ValueError, match="missing Golden Set cases"):
-        asyncio.run(
-            graph.ainvoke(
-                {"user_message": "生成内部转账方案"},
-                config=config,
-            )
-        )
+    config, interrupted = invoke_until_review(graph, "invalid-plan")
 
     checkpoint = graph.get_state(config)
-    assert checkpoint.values["status"] == "bugs_retrieved"
-    assert "test_plan" not in checkpoint.values
-    assert checkpoint.next == ("generate_test_plan",)
+    assert interrupted["__interrupt__"][0].value["status"] == (
+        "waiting_approval"
+    )
+    assert checkpoint.values["status"] == "plan_validated"
+    assert checkpoint.values["plan_generation_mode"] == (
+        "deterministic_fallback"
+    )
+    plan = GeneratedTestPlan.model_validate(checkpoint.values["test_plan"])
+    assert validate_test_plan(plan, require_golden_set=True) == plan
 
 
 @pytest.mark.parametrize(
@@ -442,12 +472,35 @@ def test_graph_rejects_unknown_requirement_source_ref(
     graph, _, _ = make_graph(tmp_path, provider=provider)
 
     with pytest.raises(
-        ValueError,
-        match="requirement contains unknown source_ref",
+        StructuredModelError,
+        match="extract_requirements failed deterministic validation",
     ) as caught:
         invoke_until_review(graph, "bad-requirement-ref")
 
     assert "secret-fake-requirement-ref" not in str(caught.value)
+    assert provider.calls == ["extract_requirements"] * 3
+
+
+def test_graph_retries_unknown_source_ref_with_exact_allowlist(
+    tmp_path: Path,
+) -> None:
+    provider = RepairingSourceRefProvider(make_provider())
+    graph, _, _ = make_graph(tmp_path, provider=provider)
+
+    _, interrupted = invoke_until_review(graph, "repair-source-ref")
+
+    assert interrupted["__interrupt__"][0].value["status"] == (
+        "waiting_approval"
+    )
+    assert provider.calls[:2] == [
+        "extract_requirements",
+        "extract_requirements",
+    ]
+    source_id = load_sources([SOURCE]).documents[0].source_id
+    assert source_id in provider.prompts[0]
+    assert "<allowed_source_refs>" in provider.prompts[0]
+    assert "<deterministic_validation_feedback>" in provider.prompts[1]
+    assert "invalid-model-source-ref" not in provider.prompts[1]
 
 
 def test_graph_rejects_unknown_non_inferred_risk_source_ref(
@@ -466,8 +519,8 @@ def test_graph_rejects_unknown_non_inferred_risk_source_ref(
     graph, _, _ = make_graph(tmp_path, provider=provider)
 
     with pytest.raises(
-        ValueError,
-        match="risk contains unknown source_ref",
+        StructuredModelError,
+        match="analyze_risks failed deterministic validation",
     ) as caught:
         invoke_until_review(graph, "bad-risk-ref")
 
@@ -481,7 +534,7 @@ def test_graph_rejects_unknown_non_inferred_risk_source_ref(
         "人工基准:TC-OTI-999",
     ],
 )
-def test_graph_rejects_unknown_or_untrusted_plan_source_ref(
+def test_graph_discards_plan_with_unknown_or_untrusted_source_ref(
     tmp_path: Path,
     bad_ref: str,
 ) -> None:
@@ -491,13 +544,16 @@ def test_graph_rejects_unknown_or_untrusted_plan_source_ref(
     ].append(bad_ref)
     graph, _, _ = make_graph(tmp_path, provider=provider)
 
-    with pytest.raises(
-        ValueError,
-        match="test plan contains unknown source_ref",
-    ) as caught:
-        invoke_until_review(graph, "bad-plan-ref")
+    config, interrupted = invoke_until_review(graph, "bad-plan-ref")
 
-    assert bad_ref not in str(caught.value)
+    assert interrupted["__interrupt__"][0].value["status"] == (
+        "waiting_approval"
+    )
+    checkpoint = graph.get_state(config)
+    assert checkpoint.values["plan_generation_mode"] == (
+        "deterministic_fallback"
+    )
+    assert bad_ref not in str(checkpoint.values["test_plan"])
 
 
 def test_graph_allows_exact_source_ref_for_a_retrieved_bug(
@@ -548,7 +604,7 @@ def test_graph_allows_exact_source_ref_for_a_retrieved_bug(
         "BUG-not-retrieved",
     ],
 )
-def test_graph_rejects_bug_ref_not_present_in_related_bugs(
+def test_graph_discards_plan_with_bug_ref_not_present_in_related_bugs(
     tmp_path: Path,
     bad_ref: str,
 ) -> None:
@@ -570,13 +626,19 @@ def test_graph_rejects_bug_ref_not_present_in_related_bugs(
         bug_client=StubBugClient([bug]),
     )
 
-    with pytest.raises(
-        ValueError,
-        match="test plan contains unknown source_ref",
-    ) as caught:
-        invoke_until_review(graph, f"unknown-bug-{bad_ref[-4:]}")
+    config, interrupted = invoke_until_review(
+        graph,
+        f"unknown-bug-{bad_ref[-4:]}",
+    )
 
-    assert bad_ref not in str(caught.value)
+    assert interrupted["__interrupt__"][0].value["status"] == (
+        "waiting_approval"
+    )
+    checkpoint = graph.get_state(config)
+    assert checkpoint.values["plan_generation_mode"] == (
+        "deterministic_fallback"
+    )
+    assert bad_ref not in str(checkpoint.values["test_plan"])
 
 
 def test_approve_rejects_bug_ref_added_after_pause_when_bug_was_not_retrieved(
